@@ -5,11 +5,6 @@ This module handles configuration parsing, validation, resource checking,
 and model fallback management. It provides a unified interface for all
 configuration-related operations while ensuring system requirements are met.
 
-Design Principles Applied:
-- KISS: Simple YAML configuration loading with clear error messages
-- DRY: Unified Hugging Face ecosystem configuration management
-- YAGNI: Only essential configuration validation, no over-engineering
-- Single Responsibility: Each class handles one aspect of configuration
 """
 
 import os

@@ -5,11 +5,6 @@ This module handles virtual environment creation, activation, dependency install
 and verification of environment isolation. It ensures all libraries and models are
 contained within a virtual environment to keep the host system clean.
 
-Design Principles Applied:
-- KISS: Simple venv operations with clear error messages
-- Single Responsibility: Each method handles one aspect of environment management
-- Fail Fast: Validate environment state before proceeding with operations
-- DRY: Reusable environment validation and setup patterns
 """
 
 import os

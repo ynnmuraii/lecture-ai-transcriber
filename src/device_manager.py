@@ -5,11 +5,6 @@ This module provides comprehensive device management capabilities including
 automatic device detection (CUDA, MPS, CPU), GPU memory management,
 model configuration optimization, and performance monitoring.
 
-Design Principles Applied:
-- KISS: Simple device detection with clear fallback strategies
-- DRY: Unified device configuration across all ML models
-- YAGNI: Focus on essential device management, avoid over-engineering
-- Single Responsibility: Each class handles one aspect of device management
 """
 
 import os

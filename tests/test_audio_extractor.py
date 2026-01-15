@@ -170,7 +170,7 @@ class TestAudioExtractor:
         assert result.metadata.duration == 120.5
         assert result.metadata.sample_rate == 16000
         assert result.metadata.channels == 1
-        assert result.processing_time > 0
+        assert result.processing_time >= 0  # Changed from > 0 to >= 0 since mocked execution is instant
     
     @patch('src.audio_extractor.ffmpeg.probe')
     def test_get_audio_metadata_success(self, mock_probe):

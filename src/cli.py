@@ -3,7 +3,6 @@
 import sys
 from pathlib import Path
 
-
 def main():
     print("Lecture Transcriber")
     

@@ -51,3 +51,10 @@ hypothesis>=6.82.0  # For property-based testing (17 properties defined)
 black>=23.0.0      # Code formatting
 flake8>=6.0.0      # Linting
 mypy>=1.5.0        # Type checking
+
+# Web interface dependencies
+fastapi>=0.104.0   # Modern async web framework
+uvicorn>=0.24.0    # ASGI server
+python-multipart>=0.0.6  # For file uploads
+aiofiles>=23.2.0   # Async file operations
+jinja2>=3.1.0      # Template engine (already included via transformers)
