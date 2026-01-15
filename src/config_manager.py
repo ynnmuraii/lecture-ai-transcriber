@@ -278,7 +278,6 @@ class ModelFallbackManager:
             # For small models, suggest even more efficient ones
             alternatives.extend([
                 "HuggingFaceTB/SmolLM3-3B",
-                "microsoft/DialoGPT-medium",  # Fallback option
             ])
         
         return alternatives
