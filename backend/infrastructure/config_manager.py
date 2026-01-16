@@ -261,13 +261,13 @@ class ModelFallbackManager:
         # Memory-efficient alternatives based on requested model
         if "large" in requested_model.lower() or "7b" in requested_model.lower():
             alternatives.extend([
-                "microsoft/Phi-4-mini-instruct",  # Smaller but capable
+                "Qwen/Qwen2.5-1.5B-Instruct",  # Smaller but capable
                 "HuggingFaceTB/SmolLM3-3B",      # Very efficient
             ])
         elif "medium" in requested_model.lower() or "3b" in requested_model.lower():
             alternatives.extend([
                 "HuggingFaceTB/SmolLM3-3B",
-                "microsoft/Phi-4-mini-instruct",
+                "Qwen/Qwen2.5-1.5B-Instruct",
             ])
         else:
             # For small models, suggest even more efficient ones
@@ -428,7 +428,7 @@ class ConfigurationManager:
         # LLM configuration
         llm_config = self._raw_config.get('llm', {})
         hf_config = llm_config.get('huggingface', {})
-        config_dict['text_generation_model'] = hf_config.get('model_name', LLMProvider.MICROSOFT_PHI4)
+        config_dict['text_generation_model'] = hf_config.get('model_name', LLMProvider.QWEN_2_5_1_5B)
         
         # Output configuration
         output_config = self._raw_config.get('output', {})

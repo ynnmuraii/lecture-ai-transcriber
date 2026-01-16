@@ -26,7 +26,7 @@ class WhisperModelSize(str, Enum):
 
 class LLMProvider(str, Enum):
     """Enumeration of supported LLM providers for text processing."""
-    MICROSOFT_PHI4 = "microsoft/Phi-4-mini-instruct"
+    QWEN_2_5_1_5B = "Qwen/Qwen2.5-1.5B-Instruct"
     SMOLLM3_3B = "HuggingFaceTB/SmolLM3-3B"
     CUSTOM = "custom"
 
@@ -178,7 +178,7 @@ class Configuration(BaseModel):
     """
     # Model selection
     whisper_model: str = Field(default=WhisperModelSize.MEDIUM, description="Whisper model for transcription")
-    text_generation_model: str = Field(default=LLMProvider.MICROSOFT_PHI4, description="LLM for text processing")
+    text_generation_model: str = Field(default=LLMProvider.QWEN_2_5_1_5B, description="LLM for text processing")
     
     # Output configuration
     output_format: str = Field(default="markdown", pattern="^(markdown|json|txt)$")

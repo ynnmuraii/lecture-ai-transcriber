@@ -398,7 +398,7 @@ class TestEnums:
     
     def test_llm_provider_values(self):
         """Test LLMProvider enum values."""
-        assert LLMProvider.MICROSOFT_PHI4 == "microsoft/Phi-4-mini-instruct"
+        assert LLMProvider.QWEN_2_5_1_5B == "Qwen/Qwen2.5-1.5B-Instruct"
         assert LLMProvider.SMOLLM3_3B == "HuggingFaceTB/SmolLM3-3B"
         assert LLMProvider.CUSTOM == "custom"
     
@@ -406,7 +406,7 @@ class TestEnums:
         """Test iterating over LLMProvider enum."""
         providers = list(LLMProvider)
         assert len(providers) == 3
-        assert LLMProvider.MICROSOFT_PHI4 in providers
+        assert LLMProvider.QWEN_2_5_1_5B in providers
         assert LLMProvider.CUSTOM in providers
     
     def test_enum_string_conversion(self):
@@ -414,8 +414,8 @@ class TestEnums:
         model = WhisperModelSize.MEDIUM
         assert model.value == "openai/whisper-medium"
         
-        provider = LLMProvider.MICROSOFT_PHI4
-        assert provider.value == "microsoft/Phi-4-mini-instruct"
+        provider = LLMProvider.QWEN_2_5_1_5B
+        assert provider.value == "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 class TestErrorClasses:
@@ -630,7 +630,7 @@ class TestPydanticModels:
         config = Configuration()
         
         assert config.whisper_model == WhisperModelSize.MEDIUM
-        assert config.text_generation_model == LLMProvider.MICROSOFT_PHI4
+        assert config.text_generation_model == LLMProvider.QWEN_2_5_1_5B
         assert config.output_format == "markdown"
         assert config.cleaning_intensity == 2
         assert config.device == "auto"

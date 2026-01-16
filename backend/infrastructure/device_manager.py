@@ -395,7 +395,7 @@ class MemoryManager:
             "whisper-small": 300,
             "whisper-medium": 800,
             "whisper-large": 1500,
-            "phi-4": 2000,
+            "qwen-1.5b": 1500,
             "smollm": 1200,
         }
         

@@ -2,7 +2,7 @@
 Segment Merger component for combining transcription segments with LLM integration.
 
 This module provides intelligent segment merging capabilities using Hugging Face
-Transformers with Microsoft Phi-4-mini-instruct for context-aware text processing,
+Transformers with Qwen2.5-1.5B-Instruct for context-aware text processing,
 word boundary repair, and technical content identification.
 
 """
@@ -55,7 +55,7 @@ class SegmentMerger:
     Combines transcription segments into coherent text with LLM assistance.
     
     This class provides intelligent segment merging using Hugging Face Transformers
-    with Microsoft Phi-4-mini-instruct for context-aware processing, word boundary
+    with Qwen2.5-1.5B-Instruct for context-aware processing, word boundary
     repair, and technical content identification.
     """
     
@@ -93,7 +93,7 @@ class SegmentMerger:
 
     def __init__(
         self,
-        model_name: str = "microsoft/Phi-4-mini-instruct",
+        model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
         device: str = "auto",
         use_llm: bool = True,
         max_segment_gap: float = 2.0,

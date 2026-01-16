@@ -17,7 +17,7 @@ class TestSegmentMergerInit:
         """Test initialization with default values."""
         merger = SegmentMerger(use_llm=False)
         
-        assert merger.model_name == "microsoft/Phi-4-mini-instruct"
+        assert merger.model_name == "Qwen/Qwen2.5-1.5B-Instruct"
         assert merger.device == "auto"
         assert merger.use_llm is False
         assert merger.max_segment_gap == 2.0
@@ -319,6 +319,6 @@ class TestModelInfo:
         
         info = merger.get_model_info()
         
-        assert info["model_name"] == "microsoft/Phi-4-mini-instruct"
+        assert info["model_name"] == "Qwen/Qwen2.5-1.5B-Instruct"
         assert info["model_loaded"] is False
         assert info["use_llm"] is False

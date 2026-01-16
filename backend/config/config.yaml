@@ -97,11 +97,11 @@ llm:
   provider: "huggingface"
   
   # Default model for text generation and summarization
-  default_model: "microsoft/Phi-4-mini-instruct"
+  default_model: "Qwen/Qwen2.5-1.5B-Instruct"
 
   huggingface:
     # Primary model for segment merging and text generation
-    model_name: "microsoft/Phi-4-mini-instruct"
+    model_name: "Qwen/Qwen2.5-1.5B-Instruct"
     max_length: 2048
     temperature: 0.7
     top_p: 0.9

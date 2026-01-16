@@ -11,7 +11,7 @@ An LLM-based tool for automatic transcription of video lectures and creation of 
   - `openai/whisper-large-v3` - Maximum quality for powerful hardware
   - `openai/whisper-large-v3-turbo` - Fast processing with high quality
   - `antony66/whisper-large-v3-russian` - Specialized model for Russian language
-- **Intelligent Text Processing**: Use Microsoft Phi-4-mini-instruct for:
+- **Intelligent Text Processing**: Use Qwen2.5-1.5B-Instruct for:
   - Text preprocessing and filler word removal
   - Intelligent segment merging
   - Technical content identification
@@ -63,7 +63,7 @@ resources:
   - `antony66/whisper-large-v3-russian` (8GB RAM) - Specialized for Russian language
 
 ### Text Processing
-- **LLM Provider**: Microsoft Phi-4-mini-instruct for intelligent text processing
+- **LLM Provider**: Qwen2.5-1.5B-Instruct for intelligent text processing
 - **Text Cleaning**: Customizable filler words and cleaning intensity
 - **Formula Processing**: Mathematical term mappings for Russian expressions
 - **Output Format**: Markdown with timestamps and metadata
