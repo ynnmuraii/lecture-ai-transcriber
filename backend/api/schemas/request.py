@@ -39,6 +39,9 @@ class TranscribeRequest(BaseModel):
             "openai/whisper-small",
             "openai/whisper-medium",
             "openai/whisper-large",
+            "openai/whisper-large-v3",
+            "openai/whisper-large-v3-turbo",
+            "antony66/whisper-large-v3-russian",
         ]
         if v not in valid_models:
             raise ValueError(f"Invalid model. Must be one of: {', '.join(valid_models)}")
@@ -49,7 +52,10 @@ class TranscribeRequest(BaseModel):
     def validate_language(cls, v: str) -> str:
         if not v or len(v) < 2:
             raise ValueError("language must be a valid language code")
-        return v.lower()
+        normalized = v.lower()
+        if normalized == "auto":
+            return "auto"
+        return normalized
 
 
 class DownloadRequest(BaseModel):

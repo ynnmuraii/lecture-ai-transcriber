@@ -32,10 +32,20 @@ whisper:
       recommended_for: "Быстрое тестирование, системы с ограниченными ресурсами"
       language_support: "Многоязычный, базовое качество"
       
+    "openai/whisper-base":
+      memory_requirement_mb: 1000
+      recommended_for: "Базовое качество, быстрый отклик"
+      language_support: "Многоязычный, приемлемое качество"
+      
     "openai/whisper-medium":
       memory_requirement_mb: 2000
       recommended_for: "Сбалансированная скорость и качество"
       language_support: "Многоязычный, хорошее качество"
+      
+    "openai/whisper-large":
+      memory_requirement_mb: 6000
+      recommended_for: "Высокое качество, требует достаточно ресурсов"
+      language_support: "Многоязычный, отличное качество"
       
     "openai/whisper-large-v3":
       memory_requirement_mb: 8000

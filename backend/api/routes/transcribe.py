@@ -10,6 +10,7 @@ This module handles transcription task creation with:
 import uuid
 import logging
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -25,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 # Create router
 router = APIRouter()
+
+# Thread pool for CPU-bound transcription tasks
+_executor = ThreadPoolExecutor(max_workers=2)
 
 
 class TaskStatus(str, Enum):
@@ -43,7 +47,7 @@ class TaskInfo:
         task_id: str,
         file_id: str,
         model: str,
-        language: str,
+        language: Optional[str],
         cleaning_intensity: int
     ):
         self.task_id = task_id
@@ -135,15 +139,12 @@ def find_uploaded_file(file_id: str) -> Optional[Path]:
     return None
 
 
-async def process_transcription(task_id: str) -> None:
+def _run_transcription_sync(task_id: str) -> None:
     """
-    Background task to process transcription.
+    Synchronous transcription processing.
     
-    This function runs the full transcription pipeline:
-    1. Extract audio from video
-    2. Transcribe audio using Whisper
-    3. Clean and process text
-    4. Generate output files
+    This function runs the full transcription pipeline synchronously
+    and is meant to be executed in a thread pool.
     
     Args:
         task_id: The ID of the task to process
@@ -155,8 +156,16 @@ async def process_transcription(task_id: str) -> None:
     
     def update_progress(progress: float, message: str):
         """Update task progress from transcription callback."""
-        # Map transcription progress (0-100) to overall progress (30-70)
+        # Transcriber reports progress in range 0-100 where:
+        # - 5-10%: Validation
+        # - 10-20%: Model loading  
+        # - 20-95%: Actual transcription
+        # - 95-100%: Post-processing
+        # 
+        # We map this to overall pipeline progress (30-70%):
         # Audio extraction: 0-20%, Model loading: 20-30%, Transcription: 30-70%, Post-processing: 70-100%
+        
+        # Map transcriber's 0-100 to our 30-70 range
         mapped_progress = 30.0 + (progress / 100.0) * 40.0
         task.progress = min(mapped_progress, 70.0)
         task.message = message
@@ -182,6 +191,9 @@ async def process_transcription(task_id: str) -> None:
         from backend.core.processing.transcriber import Transcriber, TranscriberConfig
         from backend.core.processing.preprocessor import Preprocessor
         from backend.core.processing.segment_merger import SegmentMerger
+        from backend.core.processing.formula_formatter import FormulaFormatter
+        from backend.core.processing.output_generator import OutputGenerator
+        from backend.core.models.data_models import ProcessedText, TranscriptionSegment
         
         # Step 1: Extract audio
         audio_extractor = AudioExtractor()
@@ -219,7 +231,7 @@ async def process_transcription(task_id: str) -> None:
         task.message = "Transcription complete. Processing text..."
         
         # Step 3: Clean text with preprocessor
-        preprocessor = Preprocessor()
+        preprocessor = Preprocessor(cleaning_intensity=task.cleaning_intensity)
         cleaned_segments = preprocessor.clean_segments(segments)
         
         task.progress = 80.0
@@ -228,43 +240,102 @@ async def process_transcription(task_id: str) -> None:
         # Step 4: Merge segments
         segment_merger = SegmentMerger(use_llm=False)  # Disable LLM for faster processing
         merged_result = segment_merger.merge_segments(cleaned_segments)
-        
+
+        task.progress = 85.0
+        task.message = "Formatting formulas..."
+
+        # Step 5: Format formulas in segment text
+        formula_formatter = FormulaFormatter(use_llm=task.cleaning_intensity >= 3)
+        formatted_segments = []
+        all_formulas = []
+        formula_flags = []
+        position_offset = 0
+
+        for idx, segment in enumerate(cleaned_segments):
+            formatted = formula_formatter.format_formulas(segment.text)
+            formatted_text = formatted.content
+
+            formatted_segments.append(TranscriptionSegment(
+                text=formatted_text,
+                start_time=segment.start_time,
+                end_time=segment.end_time,
+                confidence=segment.confidence
+            ))
+
+            for formula in formatted.formulas:
+                formula.position += position_offset
+                all_formulas.append(formula)
+
+            for flag in formatted.flagged_content:
+                flag.segment_index = idx
+                formula_flags.append(flag)
+
+            position_offset += len(formatted_text) + 1
+
+        cleaned_segments = formatted_segments
+
         task.progress = 90.0
         task.message = "Generating output files..."
-        
-        # Step 5: Generate output files
+
+        # Step 6: Generate output files
         output_dir = get_output_dir()
         output_base = output_dir / task_id
-        
-        # Generate Markdown output
+
+        flagged_content = []
+        if merged_result and merged_result.flagged_content:
+            flagged_content.extend(merged_result.flagged_content)
+        flagged_content.extend(formula_flags)
+
+        merged_content = merged_result.content if merged_result else " ".join(
+            seg.text for seg in cleaned_segments if seg.text.strip()
+        )
+
+        processed_text = ProcessedText(
+            content=merged_content,
+            segments=cleaned_segments,
+            formulas=all_formulas,
+            flagged_content=flagged_content,
+            processing_metadata={
+                "task_id": task_id,
+                "file_id": task.file_id,
+                "source_file": file_path.name,
+                "model": task.model,
+                "language": task.language or "auto",
+                "cleaning_intensity": task.cleaning_intensity,
+                "segment_count": len(cleaned_segments),
+                "total_duration": transcription_result.total_duration,
+                "processing_time": transcription_result.processing_time,
+                "created_at": task.created_at.isoformat(),
+                "completed_at": datetime.utcnow().isoformat(),
+            }
+        )
+
+        output_generator = OutputGenerator(
+            output_directory=str(output_dir),
+            include_timestamps=True,
+            include_metadata=True,
+            include_review_sections=True
+        )
+
         md_path = output_base.with_suffix('.md')
-        with open(md_path, 'w', encoding='utf-8') as f:
-            f.write(f"# Transcription\n\n")
-            f.write(f"**Source:** {file_path.name}\n")
-            f.write(f"**Model:** {task.model}\n")
-            f.write(f"**Language:** {task.language}\n")
-            f.write(f"**Generated:** {datetime.utcnow().isoformat()}\n\n")
-            f.write("---\n\n")
-            f.write(merged_result.content)
-        
-        # Generate JSON metadata
-        import json
         json_path = output_base.with_suffix('.json')
-        metadata = {
-            "task_id": task_id,
-            "file_id": task.file_id,
-            "source_file": file_path.name,
-            "model": task.model,
-            "language": task.language,
-            "cleaning_intensity": task.cleaning_intensity,
-            "segment_count": len(cleaned_segments),
-            "total_duration": transcription_result.total_duration,
-            "processing_time": transcription_result.processing_time,
-            "created_at": task.created_at.isoformat(),
-            "completed_at": datetime.utcnow().isoformat(),
-        }
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+        output_generator.generate_markdown(
+            processed_text=processed_text,
+            video_filename=file_path.name,
+            model_used=task.model,
+            output_path=str(md_path)
+        )
+
+        output_generator.generate_metadata(
+            processed_text=processed_text,
+            video_filename=file_path.name,
+            duration=transcription_result.total_duration,
+            language=task.language or "auto",
+            model_used=task.model,
+            video_path=str(file_path),
+            output_path=str(json_path)
+        )
         
         # Clean up temporary audio file
         try:
@@ -292,6 +363,19 @@ async def process_transcription(task_id: str) -> None:
         task.error_message = str(e)
         task.message = f"Transcription failed: {str(e)}"
 
+
+async def process_transcription(task_id: str) -> None:
+    """
+    Background task to process transcription.
+    
+    This function runs the full transcription pipeline in a thread pool
+    to avoid blocking the event loop, allowing status requests to be processed.
+    
+    Args:
+        task_id: The ID of the task to process
+    """
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(_executor, _run_transcription_sync, task_id)
 
 @router.post(
     "/transcribe",
@@ -341,6 +425,11 @@ async def start_transcription(
             }
         )
     
+    # Normalize language (auto-detect when "auto" is specified)
+    normalized_language = request.language
+    if normalized_language and normalized_language.lower() == "auto":
+        normalized_language = None
+
     # Generate unique task ID
     task_id = str(uuid.uuid4())
     
@@ -349,7 +438,7 @@ async def start_transcription(
         task_id=task_id,
         file_id=request.file_id,
         model=request.model,
-        language=request.language,
+        language=normalized_language,
         cleaning_intensity=request.cleaning_intensity
     )
     

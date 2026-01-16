@@ -76,7 +76,8 @@ class OutputGenerator:
         self,
         processed_text: ProcessedText,
         video_filename: str = "lecture",
-        model_used: str = "unknown"
+        model_used: str = "unknown",
+        output_path: Optional[str] = None
     ) -> str:
         """
         Generate a Markdown document from processed text.
@@ -92,10 +93,15 @@ class OutputGenerator:
         logger.info(f"Generating Markdown output for {video_filename}")
         
         # Create filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = Path(video_filename).stem
-        output_filename = f"{base_name}_{timestamp}.md"
-        output_path = self.output_directory / output_filename
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            base_name = output_path.stem
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = Path(video_filename).stem
+            output_filename = f"{base_name}_{timestamp}.md"
+            output_path = self.output_directory / output_filename
         
         # Build Markdown content
         markdown_lines = []
@@ -156,7 +162,8 @@ class OutputGenerator:
         duration: float,
         language: str = "ru",
         model_used: str = "unknown",
-        video_path: str = ""
+        video_path: str = "",
+        output_path: Optional[str] = None
     ) -> str:
         """
         Generate a JSON metadata file.
@@ -175,10 +182,15 @@ class OutputGenerator:
         logger.info(f"Generating metadata for {video_filename}")
         
         # Create filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = Path(video_filename).stem
-        output_filename = f"{base_name}_{timestamp}_metadata.json"
-        output_path = self.output_directory / output_filename
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            base_name = output_path.stem
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = Path(video_filename).stem
+            output_filename = f"{base_name}_{timestamp}_metadata.json"
+            output_path = self.output_directory / output_filename
         
         # Calculate statistics
         total_words = len(processed_text.content.split())

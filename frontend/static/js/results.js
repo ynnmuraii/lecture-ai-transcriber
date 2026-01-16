@@ -3,8 +3,8 @@
  * Handles displaying transcription results, markdown rendering, and navigation
  */
 
-// Import utilities from app.js
-const { toast, loading, api, storage, formatDuration, formatTimestamp, pollTaskStatus } = window.LectureTranscriber;
+// Import utilities from app.js (avoid redeclaring globals)
+const LT = window.LectureTranscriber || {};
 
 // ===========================
 // Results Manager
@@ -84,7 +84,7 @@ class ResultsManager {
     async loadResults() {
         try {
             // Poll for task status
-            await pollTaskStatus(
+            await LT.pollTaskStatus(
                 this.taskId,
                 (status) => this.updateStatus(status),
                 2000
@@ -154,9 +154,9 @@ class ResultsManager {
      */
     async loadFullResults() {
         try {
-            loading.show('Загрузка результатов...');
+            LT.loading.show('Загрузка результатов...');
             
-            const result = await api.getResult(this.taskId);
+            const result = await LT.api.getResult(this.taskId);
             this.resultData = result;
             
             if (result.status === 'completed' && result.content) {
@@ -167,9 +167,9 @@ class ResultsManager {
             
         } catch (error) {
             console.error('Error loading full results:', error);
-            toast.error('Не удалось загрузить результаты');
+            LT.toast.error('Не удалось загрузить результаты');
         } finally {
-            loading.hide();
+            LT.loading.hide();
         }
     }
 
@@ -211,7 +211,7 @@ class ResultsManager {
             this.buildTimestampNavigation();
         }
         
-        toast.success('Результаты загружены');
+        LT.toast.success('Результаты загружены');
     }
 
     /**
@@ -219,16 +219,19 @@ class ResultsManager {
      * @param {object} metadata - Metadata object
      */
     updateMetadata(metadata) {
-        if (metadata.created_at) {
-            this.metadataDate.textContent = formatTimestamp(metadata.created_at);
+        const createdAt = metadata.created_at || metadata.processing_info?.date || metadata.processing_metadata?.created_at;
+        if (createdAt) {
+            this.metadataDate.textContent = LT.formatTimestamp(createdAt);
         }
-        
-        if (metadata.duration) {
-            this.metadataDuration.textContent = formatDuration(metadata.duration);
+
+        const durationSeconds = metadata.duration || metadata.total_duration || metadata.video_info?.duration_seconds;
+        if (durationSeconds) {
+            this.metadataDuration.textContent = LT.formatDuration(durationSeconds);
         }
-        
-        if (metadata.segment_count) {
-            this.metadataSegments.textContent = `${metadata.segment_count} сегментов`;
+
+        const segmentCount = metadata.segment_count || metadata.content_stats?.segment_count;
+        if (segmentCount) {
+            this.metadataSegments.textContent = `${segmentCount} сегментов`;
         } else if (this.segments.length > 0) {
             this.metadataSegments.textContent = `${this.segments.length} сегментов`;
         }
@@ -378,7 +381,7 @@ class ResultsManager {
             
             const timeSpan = document.createElement('span');
             timeSpan.className = 'timestamp-time';
-            timeSpan.textContent = formatDuration(segment.start_time);
+            timeSpan.textContent = LT.formatDuration(segment.start_time);
             
             const previewSpan = document.createElement('span');
             previewSpan.className = 'timestamp-preview';
@@ -416,7 +419,7 @@ class ResultsManager {
         // Scroll to corresponding content
         const segment = this.segments[index];
         if (segment) {
-            const timestamp = formatDuration(segment.start_time);
+            const timestamp = LT.formatDuration(segment.start_time);
             this.scrollToTimestamp(timestamp);
         }
     }
@@ -449,11 +452,11 @@ class ResultsManager {
      */
     downloadFile(format) {
         if (!this.taskId) {
-            toast.error('Task ID не найден');
+            LT.toast.error('Task ID не найден');
             return;
         }
         
-        const url = api.getDownloadUrl(this.taskId, format);
+        const url = LT.api.getDownloadUrl(this.taskId, format);
         
         // Create temporary link and trigger download
         const link = document.createElement('a');
@@ -463,7 +466,7 @@ class ResultsManager {
         link.click();
         document.body.removeChild(link);
         
-        toast.success(`Скачивание ${format.toUpperCase()} файла начато`);
+        LT.toast.success(`Скачивание ${format.toUpperCase()} файла начато`);
     }
 
     /**
@@ -483,7 +486,7 @@ class ResultsManager {
             progressDiv.style.display = 'none';
         }
         
-        toast.error(message);
+        LT.toast.error(message);
     }
 }
 

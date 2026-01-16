@@ -184,8 +184,10 @@ class ModelFallbackManager:
         WhisperModelSize.LARGE_V3_RUSSIAN,
         WhisperModelSize.LARGE_V3,
         WhisperModelSize.LARGE_V3_TURBO,
+        WhisperModelSize.LARGE,
         WhisperModelSize.MEDIUM,
         WhisperModelSize.SMALL,
+        WhisperModelSize.BASE,
         WhisperModelSize.TINY
     ]
     

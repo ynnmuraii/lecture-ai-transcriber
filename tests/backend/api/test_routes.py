@@ -502,6 +502,122 @@ class TestDownloadEndpoint:
 
 
 # =============================================================================
+# Result Endpoint Tests (GET /api/result/{task_id})
+# Requirements: 8.4
+# =============================================================================
+
+class TestResultEndpoint:
+    """Tests for the result endpoint."""
+    
+    def test_result_completed_task(self, client, setup_test_dirs, sample_video_content):
+        """Test getting result for a completed task."""
+        # Upload and create task
+        files = {"file": ("test.mp4", sample_video_content, "video/mp4")}
+        upload_response = client.post("/api/upload", files=files)
+        file_id = upload_response.json()["file_id"]
+        
+        transcribe_response = client.post("/api/transcribe", json={"file_id": file_id})
+        task_id = transcribe_response.json()["task_id"]
+        
+        # Set task to completed and create result files
+        task = get_task(task_id)
+        task.status = TaskStatus.COMPLETED
+        task.result_path = str(setup_test_dirs["output"] / task_id)
+        
+        # Create result files
+        md_file = setup_test_dirs["output"] / f"{task_id}.md"
+        md_file.write_text("# Test Transcription\n\nThis is test content.")
+        
+        json_file = setup_test_dirs["output"] / f"{task_id}.json"
+        import json
+        metadata = {
+            "task_id": task_id,
+            "segment_count": 2,
+            "total_duration": 120.5,
+            "segments": [
+                {"text": "Hello", "start_time": 0.0, "end_time": 1.0, "confidence": 0.95},
+                {"text": "World", "start_time": 1.0, "end_time": 2.0, "confidence": 0.90}
+            ]
+        }
+        json_file.write_text(json.dumps(metadata))
+        
+        # Get result
+        response = client.get(f"/api/result/{task_id}")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["task_id"] == task_id
+        assert data["status"] == "completed"
+        assert "# Test Transcription" in data["content"]
+        assert data["metadata"]["segment_count"] == 2
+        assert len(data["segments"]) == 2
+    
+    def test_result_task_not_found(self, client, setup_test_dirs):
+        """Test getting result for non-existent task."""
+        response = client.get("/api/result/non-existent-task-id")
+        
+        assert response.status_code == 404
+        data = response.json()
+        assert data["detail"]["error"]["code"] == "TASK_NOT_FOUND"
+    
+    def test_result_task_not_completed(self, client, setup_test_dirs, sample_video_content):
+        """Test getting result for task that is not completed."""
+        # Upload and create task
+        files = {"file": ("test.mp4", sample_video_content, "video/mp4")}
+        upload_response = client.post("/api/upload", files=files)
+        file_id = upload_response.json()["file_id"]
+        
+        transcribe_response = client.post("/api/transcribe", json={"file_id": file_id})
+        task_id = transcribe_response.json()["task_id"]
+        
+        # Task is still pending, try to get result
+        response = client.get(f"/api/result/{task_id}")
+        
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["error"]["code"] == "TASK_NOT_COMPLETED"
+    
+    def test_result_empty_task_id(self, client, setup_test_dirs):
+        """Test getting result with empty task ID."""
+        response = client.get("/api/result/ ")
+        
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["error"]["code"] == "INVALID_TASK_ID"
+    
+    def test_result_without_segments(self, client, setup_test_dirs, sample_video_content):
+        """Test getting result when metadata has no segments."""
+        # Upload and create task
+        files = {"file": ("test.mp4", sample_video_content, "video/mp4")}
+        upload_response = client.post("/api/upload", files=files)
+        file_id = upload_response.json()["file_id"]
+        
+        transcribe_response = client.post("/api/transcribe", json={"file_id": file_id})
+        task_id = transcribe_response.json()["task_id"]
+        
+        # Set task to completed and create result files
+        task = get_task(task_id)
+        task.status = TaskStatus.COMPLETED
+        task.result_path = str(setup_test_dirs["output"] / task_id)
+        
+        # Create result files without segments
+        md_file = setup_test_dirs["output"] / f"{task_id}.md"
+        md_file.write_text("# Test Transcription")
+        
+        import json
+        json_file = setup_test_dirs["output"] / f"{task_id}.json"
+        metadata = {"task_id": task_id, "segment_count": 0}
+        json_file.write_text(json.dumps(metadata))
+        
+        # Get result
+        response = client.get(f"/api/result/{task_id}")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["segments"] is None or data["segments"] == []
+
+
+# =============================================================================
 # Error Response Tests
 # Requirements: 8.6
 # =============================================================================

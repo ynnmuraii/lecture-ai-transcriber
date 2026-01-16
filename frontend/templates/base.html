@@ -59,10 +59,16 @@
     <div id="loading-overlay" class="loading-overlay hidden">
         <div class="loading-spinner"></div>
         <p class="loading-text">Обработка...</p>
+        <div class="loading-progress hidden">
+            <div class="loading-progress-container">
+                <div class="loading-progress-bar"></div>
+            </div>
+            <span class="loading-progress-text">0%</span>
+        </div>
     </div>
 
     <!-- JavaScript -->
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=2"></script>
     {% block extra_js %}{% endblock %}
 </body>
 </html>

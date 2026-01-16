@@ -61,9 +61,9 @@ class Preprocessor:
         Raises:
             ConfigurationError: If cleaning_intensity is not in valid range
         """
-        if not 1 <= cleaning_intensity <= 3:
+        if not 0 <= cleaning_intensity <= 3:
             raise ConfigurationError(
-                "cleaning_intensity must be between 1 and 3",
+                "cleaning_intensity must be between 0 and 3",
                 field_name="cleaning_intensity",
                 invalid_value=cleaning_intensity
             )
@@ -380,9 +380,9 @@ class Preprocessor:
         Raises:
             ConfigurationError: If intensity is not in valid range
         """
-        if not 1 <= intensity <= 3:
+        if not 0 <= intensity <= 3:
             raise ConfigurationError(
-                "cleaning_intensity must be between 1 and 3",
+                "cleaning_intensity must be between 0 and 3",
                 field_name="cleaning_intensity",
                 invalid_value=intensity
             )

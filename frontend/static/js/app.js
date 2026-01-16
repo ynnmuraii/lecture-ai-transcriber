@@ -104,6 +104,20 @@ class LoadingOverlay {
         this.progressContainer = this.overlay.querySelector('.loading-progress');
         this.progressBar = this.overlay.querySelector('.loading-progress-bar');
         this.progressText = this.overlay.querySelector('.loading-progress-text');
+        
+        // Verify elements exist
+        if (!this.textElement) {
+            console.error('Loading text element not found');
+        }
+        if (!this.progressContainer) {
+            console.error('Loading progress container not found');
+        }
+        if (!this.progressBar) {
+            console.error('Loading progress bar not found');
+        }
+        if (!this.progressText) {
+            console.error('Loading progress text not found');
+        }
     }
 
     /**
@@ -112,13 +126,19 @@ class LoadingOverlay {
      * @param {number} progress - Optional progress percentage (0-100)
      */
     show(message = 'Обработка...', progress = null) {
-        this.textElement.textContent = message;
+        if (this.textElement) {
+            this.textElement.textContent = message;
+        }
         
         if (progress !== null && progress !== undefined) {
-            this.progressContainer.classList.remove('hidden');
+            if (this.progressContainer) {
+                this.progressContainer.classList.remove('hidden');
+            }
             this.updateProgress(progress);
         } else {
-            this.progressContainer.classList.add('hidden');
+            if (this.progressContainer) {
+                this.progressContainer.classList.add('hidden');
+            }
         }
         
         this.overlay.classList.remove('hidden');
@@ -130,8 +150,12 @@ class LoadingOverlay {
      */
     updateProgress(progress) {
         const percent = Math.max(0, Math.min(100, progress));
-        this.progressBar.style.width = `${percent}%`;
-        this.progressText.textContent = `${Math.round(percent)}%`;
+        if (this.progressBar) {
+            this.progressBar.style.width = `${percent}%`;
+        }
+        if (this.progressText) {
+            this.progressText.textContent = `${Math.round(percent)}%`;
+        }
     }
 
     /**
@@ -139,7 +163,9 @@ class LoadingOverlay {
      */
     hide() {
         this.overlay.classList.add('hidden');
-        this.progressContainer.classList.add('hidden');
+        if (this.progressContainer) {
+            this.progressContainer.classList.add('hidden');
+        }
     }
 }
 

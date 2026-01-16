@@ -17,8 +17,10 @@ import os
 class WhisperModelSize(str, Enum):
     """Enumeration of available Whisper model sizes through Hugging Face."""
     TINY = "openai/whisper-tiny"
+    BASE = "openai/whisper-base"
     SMALL = "openai/whisper-small"
     MEDIUM = "openai/whisper-medium"
+    LARGE = "openai/whisper-large"
     LARGE_V3 = "openai/whisper-large-v3"
     LARGE_V3_TURBO = "openai/whisper-large-v3-turbo"
     LARGE_V3_RUSSIAN = "antony66/whisper-large-v3-russian"
@@ -189,7 +191,7 @@ class Configuration(BaseModel):
         default_factory=lambda: ["эм", "ээ", "ну", "типа", "короче", "как бы", "вот", "это"],
         description="Russian filler words to remove"
     )
-    cleaning_intensity: int = Field(default=2, ge=1, le=3, description="Text cleaning intensity (1-3)")
+    cleaning_intensity: int = Field(default=2, ge=0, le=3, description="Text cleaning intensity (0-3)")
     
     # Formula processing
     formula_patterns: Dict[str, str] = Field(

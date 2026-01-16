@@ -140,7 +140,7 @@ async def health_check():
 
 
 # API routes registration
-from backend.api.routes import upload_router, transcribe_router, status_router, download_router
+from backend.api.routes import upload_router, transcribe_router, status_router, download_router, result_router
 from backend.api.routes.upload import set_temp_dir
 from backend.api.routes.transcribe import set_directories as set_transcribe_dirs
 
@@ -161,6 +161,9 @@ app.include_router(status_router, prefix="/api", tags=["status"])
 
 # Register download router
 app.include_router(download_router, prefix="/api", tags=["download"])
+
+# Register result router
+app.include_router(result_router, prefix="/api", tags=["result"])
 
 
 if __name__ == "__main__":
