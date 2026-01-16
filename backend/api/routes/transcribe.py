@@ -153,6 +153,15 @@ async def process_transcription(task_id: str) -> None:
         logger.error(f"Task {task_id} not found for processing")
         return
     
+    def update_progress(progress: float, message: str):
+        """Update task progress from transcription callback."""
+        # Map transcription progress (0-100) to overall progress (30-70)
+        # Audio extraction: 0-20%, Model loading: 20-30%, Transcription: 30-70%, Post-processing: 70-100%
+        mapped_progress = 30.0 + (progress / 100.0) * 40.0
+        task.progress = min(mapped_progress, 70.0)
+        task.message = message
+        logger.debug(f"Task {task_id} progress: {task.progress:.1f}% - {message}")
+    
     try:
         # Update status to processing
         task.status = TaskStatus.PROCESSING
@@ -184,7 +193,7 @@ async def process_transcription(task_id: str) -> None:
         task.progress = 20.0
         task.message = "Audio extracted. Loading transcription model..."
         
-        # Step 2: Transcribe audio
+        # Step 2: Transcribe audio with progress callback
         transcriber_config = TranscriberConfig(
             model_name=task.model,
             language=task.language
@@ -194,7 +203,12 @@ async def process_transcription(task_id: str) -> None:
         task.progress = 30.0
         task.message = f"Transcribing with {task.model}..."
         
-        transcription_result = transcriber.transcribe(audio_result.audio_path, language=task.language)
+        # Use progress callback for real-time updates
+        transcription_result = transcriber.transcribe(
+            audio_result.audio_path, 
+            language=task.language,
+            progress_callback=update_progress
+        )
         
         if not transcription_result.success:
             raise Exception(f"Transcription failed: {transcription_result.error_message}")

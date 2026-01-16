@@ -12,7 +12,7 @@ import sys
 import logging
 import time
 import warnings
-from typing import List, Dict, Any, Optional, Union, Tuple
+from typing import List, Dict, Any, Optional, Union, Tuple, Callable
 from pathlib import Path
 import numpy as np
 
@@ -235,6 +235,9 @@ class Transcriber:
     automatic device selection, memory optimization, and progress tracking.
     """
     
+    # Progress callback type hint
+    ProgressCallback = Callable[[float, str], None]
+    
     def __init__(self, 
                  config: Optional[TranscriberConfig] = None,
                  device_manager: Optional[DeviceManager] = None):
@@ -251,6 +254,7 @@ class Transcriber:
         self.model_loaded = False
         self.actual_device = None
         self.model_info = {}
+        self._progress_callback: Optional[Callable[[float, str], None]] = None
         
         # Initialize device manager if not provided
         if self.device_manager is None:
@@ -435,7 +439,8 @@ class Transcriber:
     
     def transcribe(self, audio_path: str, 
                   language: Optional[str] = None,
-                  task: Optional[str] = None) -> TranscriptionResult:
+                  task: Optional[str] = None,
+                  progress_callback: Optional[Callable[[float, str], None]] = None) -> TranscriptionResult:
         """
         Transcribe audio file to text with timestamps.
         
@@ -443,11 +448,22 @@ class Transcriber:
             audio_path: Path to audio file
             language: Language code (overrides config if provided)
             task: Task type ("transcribe" or "translate", overrides config if provided)
+            progress_callback: Optional callback function(progress: float, message: str)
+                              Called with progress percentage (0-100) and status message
             
         Returns:
             TranscriptionResult with segments and metadata
         """
         start_time = time.time()
+        self._progress_callback = progress_callback
+        
+        def report_progress(progress: float, message: str):
+            """Report progress to callback if registered."""
+            if self._progress_callback:
+                try:
+                    self._progress_callback(progress, message)
+                except Exception as e:
+                    logger.warning(f"Progress callback failed: {e}")
         
         try:
             # Validate audio file
@@ -459,9 +475,12 @@ class Transcriber:
                     processing_time=time.time() - start_time
                 )
             
+            report_progress(5.0, "Validating audio file...")
+            
             # Check if audio is silent
             if AudioProcessor.is_silent_audio(audio_path):
                 logger.info("Audio file appears to be silent")
+                report_progress(100.0, "Audio is silent - no transcription needed")
                 return TranscriptionResult(
                     success=True,
                     segments=[],
@@ -471,6 +490,7 @@ class Transcriber:
                 )
             
             # Load model if not already loaded
+            report_progress(10.0, "Loading transcription model...")
             if not self.model_loaded:
                 if not self.load_model():
                     return TranscriptionResult(
@@ -493,42 +513,15 @@ class Transcriber:
             if task or self.config.task:
                 generate_kwargs["task"] = task or self.config.task
             
-            # Transcribe with progress tracking
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                console=console,
-                transient=True
-            ) as progress:
-                
-                task_id = progress.add_task(
-                    f"Transcribing audio ({self.config.model_name})",
-                    total=100
-                )
-                
-                # Start transcription
-                progress.update(task_id, advance=10, description="Loading audio...")
-                
-                try:
-                    # Perform transcription
-                    result = self.pipeline(
-                        audio_path,
-                        generate_kwargs=generate_kwargs if generate_kwargs else None
-                    )
-                    
-                    progress.update(task_id, advance=80, description="Processing results...")
-                    
-                    # Process results into segments
-                    segments = self._process_transcription_result(result)
-                    
-                    progress.update(task_id, advance=10, description="Complete!")
-                    
-                except Exception as e:
-                    progress.update(task_id, description=f"Error: {str(e)}")
-                    raise
+            report_progress(15.0, f"Starting transcription with {self.config.model_name}...")
+            
+            # Perform chunked transcription with progress tracking
+            segments = self._transcribe_with_progress(
+                audio_path, 
+                audio_duration,
+                generate_kwargs,
+                report_progress
+            )
             
             # Calculate total duration
             total_duration = audio_duration or (
@@ -536,6 +529,8 @@ class Transcriber:
             )
             
             processing_time = time.time() - start_time
+            
+            report_progress(100.0, "Transcription complete!")
             
             logger.info(
                 f"Transcription complete: {len(segments)} segments, "
@@ -561,6 +556,239 @@ class Transcriber:
                 processing_time=time.time() - start_time
             )
     
+    def _transcribe_with_progress(
+        self,
+        audio_path: str,
+        audio_duration: Optional[float],
+        generate_kwargs: Dict[str, Any],
+        report_progress: Callable[[float, str], None]
+    ) -> List[TranscriptionSegment]:
+        """
+        Perform transcription with chunked progress reporting.
+        
+        This method breaks the audio into logical chunks and reports progress
+        after processing each chunk, providing real-time feedback.
+        
+        Args:
+            audio_path: Path to audio file
+            audio_duration: Duration of audio in seconds (for progress calculation)
+            generate_kwargs: Generation kwargs for the pipeline
+            report_progress: Function to report progress updates
+            
+        Returns:
+            List of TranscriptionSegment objects
+        """
+        try:
+            import librosa
+            
+            # Load audio for chunked processing
+            report_progress(20.0, "Loading audio file...")
+            audio_data, sample_rate = librosa.load(audio_path, sr=16000)
+            
+            if audio_duration is None:
+                audio_duration = len(audio_data) / sample_rate
+            
+            # Calculate chunk parameters
+            chunk_duration_s = self.config.chunk_length_s  # Default 30 seconds
+            total_samples = len(audio_data)
+            chunk_samples = int(chunk_duration_s * sample_rate)
+            num_chunks = max(1, (total_samples + chunk_samples - 1) // chunk_samples)
+            
+            logger.info(f"Processing {audio_duration:.1f}s audio in {num_chunks} chunks")
+            
+            all_segments = []
+            
+            # Progress range: 20% to 95% for transcription
+            progress_start = 20.0
+            progress_end = 95.0
+            progress_range = progress_end - progress_start
+            
+            for chunk_idx in range(num_chunks):
+                # Calculate chunk boundaries
+                start_sample = chunk_idx * chunk_samples
+                end_sample = min(start_sample + chunk_samples, total_samples)
+                chunk_audio = audio_data[start_sample:end_sample]
+                
+                # Calculate time offset for this chunk
+                time_offset = start_sample / sample_rate
+                
+                # Calculate and report progress
+                chunk_progress = progress_start + (chunk_idx / num_chunks) * progress_range
+                elapsed_time = time_offset
+                remaining_time = audio_duration - elapsed_time
+                
+                report_progress(
+                    chunk_progress,
+                    f"Transcribing chunk {chunk_idx + 1}/{num_chunks} "
+                    f"({elapsed_time:.0f}s / {audio_duration:.0f}s)"
+                )
+                
+                # Transcribe this chunk
+                try:
+                    chunk_result = self.pipeline(
+                        {"raw": chunk_audio, "sampling_rate": sample_rate},
+                        generate_kwargs=generate_kwargs if generate_kwargs else None
+                    )
+                    
+                    # Process chunk results and adjust timestamps
+                    chunk_segments = self._process_transcription_result(chunk_result)
+                    
+                    # Adjust timestamps to account for chunk offset
+                    chunk_end_time = (end_sample / sample_rate)
+                    for segment in chunk_segments:
+                        segment.start_time += time_offset
+                        segment.end_time += time_offset
+                        
+                        # Fix missing or invalid end timestamps
+                        if segment.end_time <= segment.start_time:
+                            # Estimate end time based on chunk boundary
+                            segment.end_time = min(segment.start_time + 5.0, chunk_end_time)
+                            logger.debug(f"Fixed missing end timestamp for segment at {segment.start_time:.1f}s")
+                    
+                    all_segments.extend(chunk_segments)
+                    
+                except Exception as e:
+                    logger.warning(f"Error transcribing chunk {chunk_idx + 1}: {e}")
+                    # Continue with other chunks even if one fails
+                    continue
+            
+            report_progress(95.0, "Processing transcription results...")
+            
+            # Validate and clean all segments
+            all_segments = self._validate_segments(all_segments)
+            
+            # Merge adjacent segments if they were split at chunk boundaries
+            all_segments = self._merge_boundary_segments(all_segments)
+            
+            return all_segments
+            
+        except ImportError:
+            # Fallback to non-chunked transcription if librosa not available
+            logger.warning("librosa not available, falling back to non-chunked transcription")
+            return self._transcribe_non_chunked(audio_path, generate_kwargs, report_progress)
+        except Exception as e:
+            logger.error(f"Chunked transcription failed: {e}")
+            # Fallback to non-chunked transcription
+            return self._transcribe_non_chunked(audio_path, generate_kwargs, report_progress)
+    
+    def _transcribe_non_chunked(
+        self,
+        audio_path: str,
+        generate_kwargs: Dict[str, Any],
+        report_progress: Callable[[float, str], None]
+    ) -> List[TranscriptionSegment]:
+        """
+        Fallback non-chunked transcription method.
+        
+        Used when chunked transcription is not possible (e.g., librosa not available).
+        
+        Args:
+            audio_path: Path to audio file
+            generate_kwargs: Generation kwargs for the pipeline
+            report_progress: Function to report progress updates
+            
+        Returns:
+            List of TranscriptionSegment objects
+        """
+        report_progress(30.0, "Transcribing audio (non-chunked mode)...")
+        
+        # Perform transcription
+        result = self.pipeline(
+            audio_path,
+            generate_kwargs=generate_kwargs if generate_kwargs else None
+        )
+        
+        report_progress(90.0, "Processing results...")
+        
+        # Process results into segments
+        segments = self._process_transcription_result(result)
+        
+        return segments
+    
+    def _merge_boundary_segments(
+        self,
+        segments: List[TranscriptionSegment]
+    ) -> List[TranscriptionSegment]:
+        """
+        Merge segments that were split at chunk boundaries.
+        
+        When audio is processed in chunks, words may be split across chunk
+        boundaries. This method attempts to merge such segments.
+        
+        Args:
+            segments: List of segments to merge
+            
+        Returns:
+            List of merged segments
+        """
+        if len(segments) <= 1:
+            return segments
+        
+        merged = []
+        i = 0
+        
+        while i < len(segments):
+            current = segments[i]
+            
+            # Check if this segment should be merged with the next
+            if i + 1 < len(segments):
+                next_seg = segments[i + 1]
+                
+                # Merge if segments are very close in time (within 0.1 seconds)
+                # and the current segment ends with an incomplete word
+                time_gap = next_seg.start_time - current.end_time
+                
+                if time_gap < 0.1 and self._should_merge_segments(current, next_seg):
+                    # Merge the segments
+                    merged_text = current.text.rstrip() + " " + next_seg.text.lstrip()
+                    merged_segment = TranscriptionSegment(
+                        text=merged_text.strip(),
+                        start_time=current.start_time,
+                        end_time=next_seg.end_time,
+                        confidence=min(current.confidence, next_seg.confidence)
+                    )
+                    merged.append(merged_segment)
+                    i += 2  # Skip both segments
+                    continue
+            
+            merged.append(current)
+            i += 1
+        
+        return merged
+    
+    def _should_merge_segments(
+        self,
+        seg1: TranscriptionSegment,
+        seg2: TranscriptionSegment
+    ) -> bool:
+        """
+        Determine if two segments should be merged.
+        
+        Args:
+            seg1: First segment
+            seg2: Second segment
+            
+        Returns:
+            True if segments should be merged
+        """
+        # Don't merge if either segment is empty
+        if not seg1.text.strip() or not seg2.text.strip():
+            return False
+        
+        # Check if first segment ends mid-word (no punctuation, lowercase continuation)
+        text1 = seg1.text.rstrip()
+        text2 = seg2.text.lstrip()
+        
+        # If first segment doesn't end with punctuation and second starts with lowercase
+        if text1 and text2:
+            ends_with_punct = text1[-1] in '.!?,:;'
+            starts_with_lower = text2[0].islower()
+            
+            if not ends_with_punct and starts_with_lower:
+                return True
+        
+        return False
+    
     def _process_transcription_result(self, result: Dict[str, Any]) -> List[TranscriptionSegment]:
         """
         Process raw transcription result into TranscriptionSegment objects.
@@ -578,18 +806,31 @@ class Transcriber:
             if isinstance(result, dict):
                 if "chunks" in result:
                     # Chunked result with timestamps
-                    for chunk in result["chunks"]:
+                    for i, chunk in enumerate(result["chunks"]):
                         # Handle None timestamps
-                        start_time = chunk["timestamp"][0] if chunk["timestamp"][0] is not None else 0.0
-                        end_time = chunk["timestamp"][1] if chunk["timestamp"][1] is not None else start_time
+                        timestamp = chunk.get("timestamp", (None, None))
+                        if timestamp is None:
+                            timestamp = (None, None)
                         
-                        segment = TranscriptionSegment(
-                            text=chunk["text"].strip(),
-                            start_time=start_time,
-                            end_time=end_time,
-                            confidence=1.0  # Whisper doesn't provide confidence scores
-                        )
-                        if segment.text:  # Only add non-empty segments
+                        start_time = timestamp[0] if timestamp[0] is not None else 0.0
+                        end_time = timestamp[1] if timestamp[1] is not None else start_time
+                        
+                        # If end_time is still invalid, estimate it
+                        if end_time <= start_time:
+                            # Estimate based on text length (rough approximation: 150 words per minute)
+                            text = chunk.get("text", "").strip()
+                            word_count = len(text.split())
+                            estimated_duration = (word_count / 150.0) * 60.0  # Convert to seconds
+                            end_time = start_time + max(1.0, estimated_duration)
+                        
+                        text = chunk.get("text", "").strip()
+                        if text:  # Only add non-empty segments
+                            segment = TranscriptionSegment(
+                                text=text,
+                                start_time=start_time,
+                                end_time=end_time,
+                                confidence=1.0  # Whisper doesn't provide confidence scores
+                            )
                             segments.append(segment)
                 
                 elif "text" in result:
@@ -743,7 +984,8 @@ def create_transcriber(model_name: str = "openai/whisper-medium",
 def transcribe_audio(audio_path: str,
                     model_name: str = "openai/whisper-medium",
                     device: str = "auto",
-                    language: str = "ru") -> TranscriptionResult:
+                    language: str = "ru",
+                    progress_callback: Optional[Callable[[float, str], None]] = None) -> TranscriptionResult:
     """
     Convenience function to transcribe audio with default settings.
     
@@ -752,6 +994,7 @@ def transcribe_audio(audio_path: str,
         model_name: Whisper model to use
         device: Device preference
         language: Language for transcription
+        progress_callback: Optional callback function(progress: float, message: str)
         
     Returns:
         TranscriptionResult
@@ -759,6 +1002,6 @@ def transcribe_audio(audio_path: str,
     transcriber = create_transcriber(model_name, device, language)
     
     try:
-        return transcriber.transcribe(audio_path)
+        return transcriber.transcribe(audio_path, progress_callback=progress_callback)
     finally:
         transcriber.clear_model()

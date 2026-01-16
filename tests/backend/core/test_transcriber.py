@@ -623,7 +623,31 @@ class TestConvenienceFunctions:
             result = transcribe_audio("test.wav", model_name="openai/whisper-tiny")
             
             assert result == mock_result
-            mock_transcriber.transcribe.assert_called_once_with("test.wav")
+            mock_transcriber.transcribe.assert_called_once_with("test.wav", progress_callback=None)
+            mock_transcriber.clear_model.assert_called_once()
+    
+    def test_transcribe_audio_with_progress_callback(self):
+        """Test convenience function with progress callback."""
+        with patch('backend.core.processing.transcriber.create_transcriber') as mock_create_transcriber:
+            mock_transcriber = MagicMock()
+            mock_result = TranscriptionResult(success=True, segments=[])
+            mock_transcriber.transcribe.return_value = mock_result
+            mock_create_transcriber.return_value = mock_transcriber
+            
+            # Create a mock progress callback
+            progress_callback = MagicMock()
+            
+            result = transcribe_audio(
+                "test.wav", 
+                model_name="openai/whisper-tiny",
+                progress_callback=progress_callback
+            )
+            
+            assert result == mock_result
+            mock_transcriber.transcribe.assert_called_once_with(
+                "test.wav", 
+                progress_callback=progress_callback
+            )
             mock_transcriber.clear_model.assert_called_once()
 
 

@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+
+{% block title %}Загрузка видео - Lecture Transcriber{% endblock %}
+
+{% block nav_upload %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Upload Page Specific Styles */
+    .upload-section {
+        max-width: 800px;
+        margin: 0 auto;
+    }
+
+    .upload-header {
+        text-align: center;
+        margin-bottom: var(--spacing-xxl);
+    }
+
+    .upload-title {
+        font-size: var(--font-size-xxl);
+        margin-bottom: var(--spacing-md);
+        color: var(--text-primary);
+    }
+
+    .upload-subtitle {
+        font-size: var(--font-size-lg);
+        color: var(--text-secondary);
+        margin-bottom: 0;
+    }
+
+    /* Drag and Drop Zone */
+    .upload-zone {
+        border: 2px dashed var(--border-color);
+        border-radius: var(--border-radius-lg);
+        padding: var(--spacing-xxl);
+        text-align: center;
+        background-color: var(--surface-color);
+        transition: all var(--transition-base);
+        cursor: pointer;
+        position: relative;
+    }
+
+    .upload-zone:hover {
+        border-color: var(--primary-color);
+        background-color: rgba(74, 144, 226, 0.05);
+    }
+
+    .upload-zone.drag-over {
+        border-color: var(--primary-color);
+        background-color: rgba(74, 144, 226, 0.1);
+        transform: scale(1.02);
+    }
+
+    .upload-zone.has-file {
+        border-color: var(--success-color);
+        background-color: rgba(40, 167, 69, 0.05);
+    }
+
+    .upload-icon {
+        font-size: 4rem;
+        margin-bottom: var(--spacing-lg);
+        color: var(--text-muted);
+    }
+
+    .upload-zone.drag-over .upload-icon,
+    .upload-zone:hover .upload-icon {
+        color: var(--primary-color);
+    }
+
+    .upload-text {
+        font-size: var(--font-size-lg);
+        color: var(--text-primary);
+        margin-bottom: var(--spacing-sm);
+    }
+
+    .upload-hint {
+        font-size: var(--font-size-sm);
+        color: var(--text-secondary);
+        margin-bottom: var(--spacing-lg);
+    }
+
+    .upload-button {
+        margin-top: var(--spacing-md);
+    }
+
+    #file-input {
+        display: none;
+    }
+
+    /* File Info Display */
+    .file-info {
+        display: none;
+        margin-top: var(--spacing-lg);
+        padding: var(--spacing-lg);
+        background-color: var(--bg-color);
+        border-radius: var(--border-radius);
+    }
+
+    .file-info.visible {
+        display: block;
+    }
+
+    .file-info-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: var(--spacing-sm);
+    }
+
+    .file-info-label {
+        font-weight: 500;
+        color: var(--text-secondary);
+    }
+
+    .file-info-value {
+        color: var(--text-primary);
+    }
+
+    .file-remove {
+        color: var(--danger-color);
+        cursor: pointer;
+        font-size: var(--font-size-sm);
+        text-decoration: underline;
+    }
+
+    .file-remove:hover {
+        color: #c82333;
+    }
+
+    /* Upload Progress */
+    .upload-progress {
+        display: none;
+        margin-top: var(--spacing-lg);
+    }
+
+    .upload-progress.visible {
+        display: block;
+    }
+
+    .progress-label {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: var(--spacing-sm);
+        font-size: var(--font-size-sm);
+        color: var(--text-secondary);
+    }
+
+    /* Settings Form */
+    .settings-form {
+        margin-top: var(--spacing-xl);
+    }
+
+    .form-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: var(--spacing-lg);
+    }
+
+    .form-help {
+        font-size: var(--font-size-sm);
+        color: var(--text-muted);
+        margin-top: var(--spacing-xs);
+    }
+
+    /* Action Buttons */
+    .action-buttons {
+        display: flex;
+        gap: var(--spacing-md);
+        justify-content: center;
+        margin-top: var(--spacing-xl);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+        .form-row {
+            grid-template-columns: 1fr;
+        }
+
+        .action-buttons {
+            flex-direction: column;
+        }
+
+        .action-buttons .btn {
+            width: 100%;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="upload-section">
+    <!-- Header -->
+    <div class="upload-header">
+        <h1 class="upload-title">Загрузка видео-лекции</h1>
+        <p class="upload-subtitle">Загрузите видеофайл для автоматической транскрипции</p>
+    </div>
+
+    <!-- Upload Card -->
+    <div class="card">
+        <!-- Drag and Drop Zone -->
+        <div id="upload-zone" class="upload-zone">
+            <div class="upload-icon">📹</div>
+            <p class="upload-text">Перетащите видеофайл сюда</p>
+            <p class="upload-hint">или</p>
+            <button type="button" class="btn btn-primary upload-button" id="select-file-btn">
+                Выбрать файл
+            </button>
+            <p class="upload-hint mt-2">Поддерживаемые форматы: MP4, WebM, MKV (макс. 500 МБ)</p>
+            <input type="file" id="file-input" accept="video/mp4,video/webm,video/x-matroska,.mp4,.webm,.mkv">
+        </div>
+
+        <!-- File Info -->
+        <div id="file-info" class="file-info">
+            <div class="file-info-row">
+                <span class="file-info-label">Файл:</span>
+                <span class="file-info-value" id="file-name">-</span>
+            </div>
+            <div class="file-info-row">
+                <span class="file-info-label">Размер:</span>
+                <span class="file-info-value" id="file-size">-</span>
+            </div>
+            <div class="file-info-row">
+                <span class="file-info-label"></span>
+                <span class="file-remove" id="file-remove">Удалить файл</span>
+            </div>
+        </div>
+
+        <!-- Upload Progress -->
+        <div id="upload-progress" class="upload-progress">
+            <div class="progress-label">
+                <span>Загрузка файла...</span>
+                <span id="progress-percent">0%</span>
+            </div>
+            <div class="progress">
+                <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+            </div>
+        </div>
+
+        <!-- Settings Form -->
+        <form id="settings-form" class="settings-form">
+            <div class="form-row">
+                <!-- Model Selection -->
+                <div class="form-group">
+                    <label for="model-select" class="form-label">Модель Whisper</label>
+                    <select id="model-select" class="form-control form-select" name="model">
+                        <option value="openai/whisper-tiny">Tiny (быстрая, низкое качество)</option>
+                        <option value="openai/whisper-base">Base (сбалансированная)</option>
+                        <option value="openai/whisper-small">Small (хорошее качество)</option>
+                        <option value="openai/whisper-medium" selected>Medium (высокое качество)</option>
+                        <option value="openai/whisper-large">Large (максимальное качество)</option>
+                    </select>
+                    <p class="form-help">Большие модели дают лучшее качество, но требуют больше времени</p>
+                </div>
+
+                <!-- Language Selection -->
+                <div class="form-group">
+                    <label for="language-select" class="form-label">Язык</label>
+                    <select id="language-select" class="form-control form-select" name="language">
+                        <option value="ru" selected>Русский</option>
+                        <option value="en">English</option>
+                        <option value="auto">Автоопределение</option>
+                    </select>
+                    <p class="form-help">Выберите язык лекции для лучшего качества</p>
+                </div>
+            </div>
+
+            <!-- Cleaning Intensity -->
+            <div class="form-group">
+                <label for="cleaning-intensity" class="form-label">
+                    Интенсивность очистки: <span id="intensity-value">2</span>
+                </label>
+                <input 
+                    type="range" 
+                    id="cleaning-intensity" 
+                    class="form-control" 
+                    name="cleaning_intensity"
+                    min="0" 
+                    max="3" 
+                    value="2" 
+                    step="1"
+                    style="padding: 0;"
+                >
+                <p class="form-help">
+                    0 - минимальная очистка, 3 - максимальная очистка текста
+                </p>
+            </div>
+        </form>
+
+        <!-- Action Buttons -->
+        <div class="action-buttons">
+            <button type="button" class="btn btn-secondary" id="reset-btn" disabled>
+                Сбросить
+            </button>
+            <button type="button" class="btn btn-primary" id="start-transcription-btn" disabled>
+                Начать транскрипцию
+            </button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="/static/js/upload.js"></script>
+{% endblock %}

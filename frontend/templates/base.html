@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Lecture Transcriber - Автоматическая транскрипция видео-лекций">
+    <title>{% block title %}Lecture Transcriber{% endblock %}</title>
+    
+    <!-- CSS -->
+    <link rel="stylesheet" href="/static/css/main.css">
+    {% block extra_css %}{% endblock %}
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/x-icon" href="/static/assets/icons/favicon.ico">
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="container">
+            <div class="navbar-brand">
+                <a href="/" class="navbar-logo">
+                    <span class="logo-icon">🎓</span>
+                    <span class="logo-text">Lecture Transcriber</span>
+                </a>
+            </div>
+            <div class="navbar-menu">
+                <a href="/" class="navbar-item {% block nav_upload %}{% endblock %}">
+                    <span class="nav-icon">📤</span>
+                    Загрузка
+                </a>
+                <a href="/settings" class="navbar-item {% block nav_settings %}{% endblock %}">
+                    <span class="nav-icon">⚙️</span>
+                    Настройки
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <div class="container">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <p class="footer-text">
+                &copy; 2026 Lecture Transcriber. Powered by Whisper AI.
+            </p>
+        </div>
+    </footer>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay hidden">
+        <div class="loading-spinner"></div>
+        <p class="loading-text">Обработка...</p>
+    </div>
+
+    <!-- JavaScript -->
+    <script src="/static/js/app.js"></script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>
