@@ -58,6 +58,28 @@ class TranscriptionSegment:
 
 
 @dataclass
+class SpeechSegment:
+    """
+    Represents a segment of detected speech from Voice Activity Detection.
+    
+    Used by VAD to identify regions of audio that contain speech,
+    which can then be processed by the transcription system.
+    """
+    start_time: float  # Time in seconds
+    end_time: float    # Time in seconds
+    confidence: float = 0.0  # VAD confidence score from 0.0 to 1.0
+    
+    def __post_init__(self):
+        """Validate speech segment data after initialization."""
+        if self.start_time < 0:
+            raise ValueError("start_time must be non-negative")
+        if self.end_time < self.start_time:
+            raise ValueError("end_time must be greater than or equal to start_time")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must be between 0.0 and 1.0")
+
+
+@dataclass
 class AudioMetadata:
     """
     Metadata information about extracted audio files.

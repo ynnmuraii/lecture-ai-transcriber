@@ -75,6 +75,29 @@ audio:
   channels: 1  # Mono audio
   bitrate: "128k"
 
+# Voice Activity Detection (VAD) Settings
+vad:
+  # VAD confidence threshold (0.0-1.0)
+  # Higher values = more conservative speech detection
+  threshold: 0.5
+  
+  # Minimum duration for speech segments (seconds)
+  # Segments shorter than this will be filtered out
+  min_speech_duration: 0.25
+  
+  # Minimum duration for silence segments (seconds)
+  # Silence shorter than this will be merged with adjacent speech
+  min_silence_duration: 0.1
+  
+  # Maximum gap between speech segments to merge them (seconds)
+  max_merge_gap: 0.5
+  
+  # Enable VAD processing (set to false to disable)
+  enabled: true
+  
+  # Sample rate for VAD processing (16000 Hz is optimal for Silero VAD)
+  sample_rate: 16000
+
 # Text Preprocessing Settings
 preprocessing:
   filler_words:

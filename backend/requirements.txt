@@ -28,6 +28,9 @@ torchaudio>=2.0.0
 huggingface-hub>=0.16.0
 numpy>=1.24.0
 
+# Voice Activity Detection
+silero-vad>=4.0.0
+
 # Utilities
 rich>=13.0.0
 tqdm>=4.65.0

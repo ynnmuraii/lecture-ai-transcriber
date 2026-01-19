@@ -9,13 +9,14 @@ progress tracking, error recovery, and ensures all components work together seam
 import os
 import time
 import logging
+import torch
 from typing import Dict, Any, Optional, Callable, List
 from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
 
 from backend.core.models.data_models import (
-    ProcessingResult, ProcessedText, TranscriptionSegment,
+    ProcessingResult, ProcessedText, TranscriptionSegment, TranscriptionResult,
     Configuration, AudioMetadata
 )
 from backend.core.models.errors import TranscriptionError, AudioExtractionError
@@ -23,6 +24,7 @@ from backend.core.processing.audio_extractor import AudioExtractor
 from backend.core.processing.transcriber import Transcriber, TranscriberConfig
 from backend.core.processing.preprocessor import Preprocessor
 from backend.core.processing.segment_merger import SegmentMerger
+from backend.core.processing.vad_processor import VADProcessor
 from backend.infrastructure.config_manager import ConfigurationManager
 from backend.infrastructure.device_manager import DeviceManager
 
@@ -34,6 +36,7 @@ class ProcessingStage(str, Enum):
     """Enumeration of processing pipeline stages."""
     INITIALIZING = "initializing"
     EXTRACTING_AUDIO = "extracting_audio"
+    DETECTING_SPEECH = "detecting_speech"
     TRANSCRIBING = "transcribing"
     PREPROCESSING = "preprocessing"
     MERGING_SEGMENTS = "merging_segments"
@@ -61,7 +64,7 @@ class ProcessingProgress:
     stage: ProcessingStage = ProcessingStage.INITIALIZING
     progress_percent: float = 0.0
     current_step: str = ""
-    total_steps: int = 6
+    total_steps: int = 7
     completed_steps: int = 0
     start_time: float = field(default_factory=time.time)
     stage_start_time: float = field(default_factory=time.time)
@@ -78,6 +81,7 @@ class ProcessingProgress:
         stage_order = [
             ProcessingStage.INITIALIZING,
             ProcessingStage.EXTRACTING_AUDIO,
+            ProcessingStage.DETECTING_SPEECH,
             ProcessingStage.TRANSCRIBING,
             ProcessingStage.PREPROCESSING,
             ProcessingStage.MERGING_SEGMENTS,
@@ -132,6 +136,7 @@ class PipelineOrchestrator:
         
         # Component instances (lazy-loaded)
         self.audio_extractor: Optional[AudioExtractor] = None
+        self.vad_processor: Optional[VADProcessor] = None
         self.transcriber: Optional[Transcriber] = None
         self.preprocessor: Optional[Preprocessor] = None
         self.segment_merger: Optional[SegmentMerger] = None
@@ -140,6 +145,7 @@ class PipelineOrchestrator:
         # Processing state
         self.current_video_path: Optional[str] = None
         self.current_audio_path: Optional[str] = None
+        self.speech_segments: List = []
         self.intermediate_files: List[str] = []
         
         logger.info("Pipeline Orchestrator initialized")
@@ -161,6 +167,15 @@ class PipelineOrchestrator:
             temp_dir=self.config.temp_directory,
             sample_rate=16000,  # Optimal for Whisper
             channels=1  # Mono
+        )
+        
+        # Initialize VAD processor
+        vad_config = getattr(self.config, 'vad', {})
+        self.vad_processor = VADProcessor(
+            threshold=vad_config.get('threshold', 0.5),
+            min_speech_duration=vad_config.get('min_speech_duration', 0.25),
+            min_silence_duration=vad_config.get('min_silence_duration', 0.1),
+            sample_rate=16000
         )
         
         # Initialize transcriber
@@ -272,14 +287,41 @@ class PipelineOrchestrator:
             if options.save_intermediate_files:
                 self.intermediate_files.append(audio_result.audio_path)
             
-            # Stage 3: Transcribe
+            # Stage 3: Detect speech with VAD
+            self._update_progress(
+                ProcessingStage.DETECTING_SPEECH,
+                "Detecting speech segments with VAD"
+            )
+            vad_result = self._detect_speech_segments(audio_result.audio_path)
+            
+            if not vad_result['success']:
+                self.progress.warnings.append(
+                    f"VAD detection failed: {vad_result.get('error', 'Unknown error')}. "
+                    "Proceeding with full audio transcription."
+                )
+                # Continue without VAD filtering
+                speech_segments = None
+            else:
+                speech_segments = vad_result['segments']
+                logger.info(f"Detected {len(speech_segments)} speech segments")
+                
+                # Log speech ratio for debugging
+                if audio_result.metadata:
+                    speech_ratio = self.vad_processor.get_speech_ratio(
+                        speech_segments, 
+                        audio_result.metadata.duration
+                    )
+                    logger.info(f"Speech ratio: {speech_ratio:.2%}")
+            
+            # Stage 4: Transcribe
             self._update_progress(
                 ProcessingStage.TRANSCRIBING,
                 f"Transcribing audio with {options.model_name}"
             )
             transcription_result = self._transcribe_audio(
                 audio_result.audio_path,
-                options.language
+                options.language,
+                speech_segments
             )
             
             if not transcription_result.success:
@@ -291,7 +333,7 @@ class PipelineOrchestrator:
             segments = transcription_result.segments
             logger.info(f"Transcribed {len(segments)} segments")
             
-            # Stage 4: Preprocess
+            # Stage 5: Preprocess
             self._update_progress(
                 ProcessingStage.PREPROCESSING,
                 f"Cleaning text (intensity: {options.cleaning_intensity})"
@@ -299,7 +341,7 @@ class PipelineOrchestrator:
             cleaned_segments = self._preprocess_segments(segments)
             logger.info(f"Preprocessed {len(cleaned_segments)} segments")
             
-            # Stage 5: Merge segments
+            # Stage 6: Merge segments
             merged_text = None
             if options.enable_segment_merging:
                 self._update_progress(
@@ -309,7 +351,7 @@ class PipelineOrchestrator:
                 merged_text = self._merge_segments(cleaned_segments)
                 logger.info("Segments merged successfully")
             
-            # Stage 6: Generate output
+            # Stage 7: Generate output
             self._update_progress(
                 ProcessingStage.GENERATING_OUTPUT,
                 f"Generating {options.output_format} output"
@@ -384,13 +426,65 @@ class PipelineOrchestrator:
                 recoverable=False
             )
     
-    def _transcribe_audio(self, audio_path: str, language: str):
-        """Transcribe audio file to text."""
+    def _detect_speech_segments(self, audio_path: str) -> Dict[str, Any]:
+        """
+        Detect speech segments using VAD.
+        
+        Args:
+            audio_path: Path to audio file
+            
+        Returns:
+            Dictionary with 'success', 'segments', and optional 'error' keys
+        """
+        if not self.vad_processor:
+            return {
+                'success': False,
+                'error': 'VAD processor not initialized'
+            }
+        
+        try:
+            segments = self.vad_processor.detect_speech_segments(audio_path)
+            
+            # Validate and merge close segments
+            segments = self.vad_processor.validate_segments(segments)
+            segments = self.vad_processor.merge_close_segments(segments, max_gap=0.5)
+            
+            # Store for later use
+            self.speech_segments = segments
+            
+            return {
+                'success': True,
+                'segments': segments
+            }
+        except Exception as e:
+            logger.error(f"VAD detection error: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def _transcribe_audio(self, audio_path: str, language: str, speech_segments: Optional[List] = None):
+        """
+        Transcribe audio file to text, optionally using only speech segments.
+        
+        Args:
+            audio_path: Path to audio file
+            language: Language for transcription
+            speech_segments: Optional list of SpeechSegment objects from VAD
+            
+        Returns:
+            TranscriptionResult
+        """
         if not self.transcriber:
             raise TranscriptionError("Transcriber not initialized", "initialization")
         
         try:
-            return self.transcriber.transcribe(audio_path, language=language)
+            # If we have speech segments, transcribe only those regions
+            if speech_segments:
+                return self._transcribe_with_vad_segments(audio_path, language, speech_segments)
+            else:
+                # Fallback to full audio transcription
+                return self.transcriber.transcribe(audio_path, language=language)
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             raise TranscriptionError(
@@ -398,6 +492,107 @@ class PipelineOrchestrator:
                 error_type="transcription",
                 recoverable=False
             )
+    
+    def _transcribe_with_vad_segments(self, audio_path: str, language: str, speech_segments: List) -> TranscriptionResult:
+        """
+        Transcribe audio using only VAD-detected speech segments.
+        
+        This method processes each speech segment separately and then combines
+        the results with corrected timestamps.
+        
+        Args:
+            audio_path: Path to audio file
+            language: Language for transcription
+            speech_segments: List of SpeechSegment objects
+            
+        Returns:
+            TranscriptionResult with properly timestamped segments
+        """
+        import torchaudio
+        from pathlib import Path
+        
+        all_segments = []
+        start_time = time.time()
+        
+        try:
+            # Load the full audio
+            wav, sr = torchaudio.load(audio_path)
+            
+            # Convert to mono if stereo
+            if wav.shape[0] > 1:
+                wav = torch.mean(wav, dim=0, keepdim=True)
+            
+            # Process each speech segment
+            for i, speech_seg in enumerate(speech_segments):
+                logger.debug(f"Transcribing speech segment {i+1}/{len(speech_segments)}: "
+                           f"{speech_seg.start_time:.2f}s - {speech_seg.end_time:.2f}s")
+                
+                # Extract audio for this segment
+                start_sample = int(speech_seg.start_time * sr)
+                end_sample = int(speech_seg.end_time * sr)
+                
+                # Ensure we don't go beyond audio bounds
+                start_sample = max(0, start_sample)
+                end_sample = min(wav.shape[1], end_sample)
+                
+                if start_sample >= end_sample:
+                    logger.warning(f"Invalid segment bounds: {start_sample} >= {end_sample}")
+                    continue
+                
+                segment_audio = wav[:, start_sample:end_sample]
+                
+                # Save segment to temporary file
+                temp_segment_path = Path(self.config.temp_directory) / f"segment_{i}.wav"
+                torchaudio.save(str(temp_segment_path), segment_audio, sr)
+                
+                try:
+                    # Transcribe this segment
+                    segment_result = self.transcriber.transcribe(
+                        str(temp_segment_path),
+                        language=language
+                    )
+                    
+                    if segment_result.success and segment_result.segments:
+                        # Adjust timestamps to match original audio
+                        for trans_seg in segment_result.segments:
+                            # Add the speech segment's start time to restore original timestamps
+                            trans_seg.start_time += speech_seg.start_time
+                            trans_seg.end_time += speech_seg.start_time
+                            
+                            # Ensure end_time doesn't exceed speech segment boundary
+                            trans_seg.end_time = min(trans_seg.end_time, speech_seg.end_time)
+                            
+                            all_segments.append(trans_seg)
+                
+                finally:
+                    # Clean up temporary segment file
+                    if temp_segment_path.exists():
+                        temp_segment_path.unlink()
+            
+            # Sort segments by start time
+            all_segments.sort(key=lambda x: x.start_time)
+            
+            # Calculate total duration
+            total_duration = speech_segments[-1].end_time if speech_segments else 0.0
+            
+            processing_time = time.time() - start_time
+            
+            logger.info(f"VAD-based transcription complete: {len(all_segments)} segments from "
+                       f"{len(speech_segments)} speech regions in {processing_time:.1f}s")
+            
+            return TranscriptionResult(
+                success=True,
+                segments=all_segments,
+                total_duration=total_duration,
+                model_used=self.transcriber.config.model_name,
+                processing_time=processing_time
+            )
+            
+        except Exception as e:
+            logger.error(f"VAD-based transcription failed: {e}")
+            # Fallback to full audio transcription
+            logger.info("Falling back to full audio transcription")
+            return self.transcriber.transcribe(audio_path, language=language)
     
     def _preprocess_segments(self, segments: List[TranscriptionSegment]) -> List[TranscriptionSegment]:
         """Preprocess transcription segments."""
