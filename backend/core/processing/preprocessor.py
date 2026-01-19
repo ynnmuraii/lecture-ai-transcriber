@@ -9,8 +9,9 @@ All operations preserve original timestamps for video synchronization.
 
 import re
 import logging
-from typing import List, Set, Dict, Any
+from typing import List, Set, Dict, Any, Tuple
 from dataclasses import dataclass
+from collections import deque
 
 from backend.core.models.data_models import TranscriptionSegment
 from backend.core.models.errors import ConfigurationError
@@ -28,6 +29,9 @@ class CleaningStats:
     pause_markers_cleaned: int = 0
     total_chars_before: int = 0
     total_chars_after: int = 0
+    sentence_repetitions_removed: int = 0
+    fuzzy_duplicates_merged: int = 0
+    cyclic_patterns_detected: int = 0
 
 
 class Preprocessor:
@@ -120,6 +124,11 @@ class Preprocessor:
             return []
         
         stats = CleaningStats()
+        
+        # First pass: Apply sliding window deduplication across segments
+        if self.cleaning_intensity >= 2:
+            segments = self.apply_sliding_window_deduplication(segments, window_size=3, stats=stats)
+        
         cleaned_segments = []
         
         for segment in segments:
@@ -170,19 +179,28 @@ class Preprocessor:
             # Normalize whitespace
             cleaned = self._normalize_whitespace(cleaned)
         
-        # Level 2: Standard cleaning (includes filler word removal)
+        # Level 2: Standard cleaning (includes filler word removal and basic deduplication)
         if self.cleaning_intensity >= 2:
             # Remove filler words
             cleaned = self.remove_filler_words(cleaned, stats)
             
-            # Merge repetitions
+            # Merge word-level repetitions
             cleaned = self.merge_repetitions(cleaned, stats)
+            
+            # Detect and remove sentence-level repetitions
+            cleaned = self.detect_sentence_repetitions(cleaned, stats)
             
             # Normalize whitespace again after removals
             cleaned = self._normalize_whitespace(cleaned)
         
-        # Level 3: Aggressive cleaning (additional cleanup)
+        # Level 3: Aggressive cleaning (includes fuzzy matching and cyclic pattern detection)
         if self.cleaning_intensity >= 3:
+            # Apply fuzzy matching for nearly identical sentences
+            cleaned = self.fuzzy_match_sentences(cleaned, similarity_threshold=0.85, stats=stats)
+            
+            # Detect and remove cyclic patterns
+            cleaned = self.detect_cyclic_patterns(cleaned, max_pattern_length=5, stats=stats)
+            
             # Remove extra punctuation
             cleaned = self._clean_extra_punctuation(cleaned)
             
@@ -340,7 +358,10 @@ class Preprocessor:
         logger.info(
             f"Cleaning complete: {stats.segments_processed} segments processed, "
             f"{stats.filler_words_removed} filler words removed, "
-            f"{stats.repetitions_merged} repetitions merged, "
+            f"{stats.repetitions_merged} word repetitions merged, "
+            f"{stats.sentence_repetitions_removed} sentence repetitions removed, "
+            f"{stats.fuzzy_duplicates_merged} fuzzy duplicates merged, "
+            f"{stats.cyclic_patterns_detected} cyclic patterns detected, "
             f"{stats.pause_markers_cleaned} pause markers cleaned, "
             f"text reduced by {reduction_percent:.1f}%"
         )
@@ -389,3 +410,315 @@ class Preprocessor:
         
         self.cleaning_intensity = intensity
         logger.info(f"Updated cleaning intensity to level {intensity}")
+    
+    # Advanced deduplication methods
+    
+    def _split_into_sentences(self, text: str) -> List[str]:
+        """
+        Split text into sentences for sentence-level deduplication.
+        
+        Args:
+            text: Text to split
+            
+        Returns:
+            List of sentences
+        """
+        if not text:
+            return []
+        
+        # Split on sentence boundaries (., !, ?, ;)
+        # Keep the delimiter with the sentence
+        sentences = re.split(r'([.!?;]\s+)', text)
+        
+        # Recombine sentences with their delimiters
+        result = []
+        for i in range(0, len(sentences) - 1, 2):
+            sentence = sentences[i]
+            if i + 1 < len(sentences):
+                sentence += sentences[i + 1]
+            sentence = sentence.strip()
+            if sentence:
+                result.append(sentence)
+        
+        # Handle last sentence if no delimiter
+        if len(sentences) % 2 == 1 and sentences[-1].strip():
+            result.append(sentences[-1].strip())
+        
+        return result
+    
+    def _normalize_sentence(self, sentence: str) -> str:
+        """
+        Normalize sentence for comparison (lowercase, remove extra spaces).
+        
+        Args:
+            sentence: Sentence to normalize
+            
+        Returns:
+            Normalized sentence
+        """
+        # Convert to lowercase
+        normalized = sentence.lower()
+        
+        # Remove punctuation for comparison
+        normalized = re.sub(r'[.!?,;:]', '', normalized)
+        
+        # Normalize whitespace
+        normalized = self.multi_space_regex.sub(' ', normalized)
+        
+        return normalized.strip()
+    
+    def detect_sentence_repetitions(self, text: str, stats: CleaningStats = None) -> str:
+        """
+        Detect and remove repeating sentences (not just words).
+        
+        This method identifies consecutive duplicate sentences and removes them,
+        keeping only the first occurrence.
+        
+        Args:
+            text: Text to process
+            stats: Optional statistics tracker
+            
+        Returns:
+            Text with sentence repetitions removed
+        """
+        if not text:
+            return text
+        
+        sentences = self._split_into_sentences(text)
+        if len(sentences) <= 1:
+            return text
+        
+        # Track seen sentences and build result
+        result = []
+        prev_normalized = None
+        removed_count = 0
+        
+        for sentence in sentences:
+            normalized = self._normalize_sentence(sentence)
+            
+            # Skip if this is a duplicate of the previous sentence
+            if normalized and normalized == prev_normalized:
+                removed_count += 1
+                continue
+            
+            result.append(sentence)
+            prev_normalized = normalized
+        
+        if stats:
+            stats.sentence_repetitions_removed += removed_count
+        
+        return ' '.join(result)
+    
+    def levenshtein_distance(self, s1: str, s2: str) -> int:
+        """
+        Calculate Levenshtein distance between two strings.
+        
+        Args:
+            s1: First string
+            s2: Second string
+            
+        Returns:
+            Edit distance between the strings
+        """
+        if len(s1) < len(s2):
+            return self.levenshtein_distance(s2, s1)
+        
+        if len(s2) == 0:
+            return len(s1)
+        
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                # Cost of insertions, deletions, or substitutions
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        return previous_row[-1]
+    
+    def fuzzy_match_sentences(
+        self, 
+        text: str, 
+        similarity_threshold: float = 0.85,
+        stats: CleaningStats = None
+    ) -> str:
+        """
+        Detect and merge nearly identical sentences using fuzzy matching.
+        
+        Uses Levenshtein distance to identify sentences that are very similar
+        but not exactly identical (e.g., minor transcription variations).
+        
+        Args:
+            text: Text to process
+            similarity_threshold: Minimum similarity ratio (0.0-1.0) to consider a match
+            stats: Optional statistics tracker
+            
+        Returns:
+            Text with fuzzy duplicates merged
+        """
+        if not text:
+            return text
+        
+        sentences = self._split_into_sentences(text)
+        if len(sentences) <= 1:
+            return text
+        
+        result = []
+        merged_count = 0
+        i = 0
+        
+        while i < len(sentences):
+            current = sentences[i]
+            current_normalized = self._normalize_sentence(current)
+            
+            # Look ahead to find similar sentences
+            j = i + 1
+            while j < len(sentences):
+                next_sentence = sentences[j]
+                next_normalized = self._normalize_sentence(next_sentence)
+                
+                # Calculate similarity
+                if current_normalized and next_normalized:
+                    max_len = max(len(current_normalized), len(next_normalized))
+                    if max_len > 0:
+                        distance = self.levenshtein_distance(current_normalized, next_normalized)
+                        similarity = 1.0 - (distance / max_len)
+                        
+                        if similarity >= similarity_threshold:
+                            # Skip the similar sentence
+                            merged_count += 1
+                            j += 1
+                            continue
+                
+                # Not similar, stop looking ahead
+                break
+            
+            result.append(current)
+            i = j if j > i + 1 else i + 1
+        
+        if stats:
+            stats.fuzzy_duplicates_merged += merged_count
+        
+        return ' '.join(result)
+    
+    def detect_cyclic_patterns(
+        self, 
+        text: str, 
+        max_pattern_length: int = 5,
+        stats: CleaningStats = None
+    ) -> str:
+        """
+        Detect and remove cyclic repetition patterns (A-B-A-B-A-B).
+        
+        This method identifies repeating sequences of sentences and removes
+        the repetitions, keeping only the first occurrence of the pattern.
+        
+        Args:
+            text: Text to process
+            max_pattern_length: Maximum number of sentences in a pattern
+            stats: Optional statistics tracker
+            
+        Returns:
+            Text with cyclic patterns removed
+        """
+        if not text:
+            return text
+        
+        sentences = self._split_into_sentences(text)
+        if len(sentences) < 4:  # Need at least 2 repetitions of 2-sentence pattern
+            return text
+        
+        # Normalize sentences for comparison
+        normalized_sentences = [self._normalize_sentence(s) for s in sentences]
+        
+        result = []
+        i = 0
+        patterns_detected = 0
+        
+        while i < len(sentences):
+            # Try different pattern lengths
+            pattern_found = False
+            
+            for pattern_len in range(1, min(max_pattern_length + 1, len(sentences) - i)):
+                # Extract potential pattern
+                pattern = normalized_sentences[i:i + pattern_len]
+                
+                # Check if this pattern repeats at least once
+                repetitions = 1
+                j = i + pattern_len
+                
+                while j + pattern_len <= len(sentences):
+                    next_segment = normalized_sentences[j:j + pattern_len]
+                    if next_segment == pattern:
+                        repetitions += 1
+                        j += pattern_len
+                    else:
+                        break
+                
+                # If we found at least 2 repetitions, this is a cyclic pattern
+                if repetitions >= 2:
+                    # Add only the first occurrence of the pattern
+                    result.extend(sentences[i:i + pattern_len])
+                    patterns_detected += 1
+                    i = j
+                    pattern_found = True
+                    break
+            
+            if not pattern_found:
+                result.append(sentences[i])
+                i += 1
+        
+        if stats:
+            stats.cyclic_patterns_detected += patterns_detected
+        
+        return ' '.join(result)
+    
+    def apply_sliding_window_deduplication(
+        self,
+        segments: List[TranscriptionSegment],
+        window_size: int = 3,
+        stats: CleaningStats = None
+    ) -> List[TranscriptionSegment]:
+        """
+        Apply sliding window to detect repetitions across segment boundaries.
+        
+        This method uses a sliding window approach to detect repetitions that
+        span multiple segments, which is common when chunks are processed separately.
+        
+        Args:
+            segments: List of transcription segments
+            window_size: Number of segments to consider in the window
+            stats: Optional statistics tracker
+            
+        Returns:
+            List of segments with cross-boundary repetitions removed
+        """
+        if not segments or len(segments) < 2:
+            return segments
+        
+        result = []
+        window = deque(maxlen=window_size)
+        
+        for segment in segments:
+            # Normalize the segment text for comparison
+            normalized_text = self._normalize_sentence(segment.text)
+            
+            # Check if this segment is a duplicate of any in the window
+            is_duplicate = False
+            for prev_normalized in window:
+                if normalized_text == prev_normalized:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                result.append(segment)
+                window.append(normalized_text)
+        
+        removed = len(segments) - len(result)
+        if stats and removed > 0:
+            stats.repetitions_merged += removed
+        
+        return result
