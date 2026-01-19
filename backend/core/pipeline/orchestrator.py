@@ -26,6 +26,7 @@ from backend.core.processing.preprocessor import Preprocessor
 from backend.core.processing.segment_merger import SegmentMerger
 from backend.core.processing.vad_processor import VADProcessor
 from backend.core.processing.hallucination_filter import HallucinationFilter, HallucinationFilterConfig
+from backend.core.processing.deduplicator import SegmentDeduplicator
 from backend.infrastructure.config_manager import ConfigurationManager
 from backend.infrastructure.device_manager import DeviceManager
 
@@ -40,6 +41,7 @@ class ProcessingStage(str, Enum):
     DETECTING_SPEECH = "detecting_speech"
     TRANSCRIBING = "transcribing"
     FILTERING_HALLUCINATIONS = "filtering_hallucinations"
+    DEDUPLICATING = "deduplicating"
     PREPROCESSING = "preprocessing"
     MERGING_SEGMENTS = "merging_segments"
     FORMATTING_FORMULAS = "formatting_formulas"
@@ -66,7 +68,7 @@ class ProcessingProgress:
     stage: ProcessingStage = ProcessingStage.INITIALIZING
     progress_percent: float = 0.0
     current_step: str = ""
-    total_steps: int = 8
+    total_steps: int = 9
     completed_steps: int = 0
     start_time: float = field(default_factory=time.time)
     stage_start_time: float = field(default_factory=time.time)
@@ -86,6 +88,7 @@ class ProcessingProgress:
             ProcessingStage.DETECTING_SPEECH,
             ProcessingStage.TRANSCRIBING,
             ProcessingStage.FILTERING_HALLUCINATIONS,
+            ProcessingStage.DEDUPLICATING,
             ProcessingStage.PREPROCESSING,
             ProcessingStage.MERGING_SEGMENTS,
             ProcessingStage.GENERATING_OUTPUT,
@@ -142,6 +145,7 @@ class PipelineOrchestrator:
         self.vad_processor: Optional[VADProcessor] = None
         self.transcriber: Optional[Transcriber] = None
         self.hallucination_filter: Optional[HallucinationFilter] = None
+        self.deduplicator: Optional[SegmentDeduplicator] = None
         self.preprocessor: Optional[Preprocessor] = None
         self.segment_merger: Optional[SegmentMerger] = None
         self.device_manager: Optional[DeviceManager] = None
@@ -208,6 +212,17 @@ class PipelineOrchestrator:
             custom_blacklist=hallucination_config_dict.get('custom_blacklist', [])
         )
         self.hallucination_filter = HallucinationFilter(config=hallucination_config)
+        
+        # Initialize deduplicator
+        deduplication_config = getattr(self.config, 'deduplication', {})
+        self.deduplicator = SegmentDeduplicator(
+            similarity_threshold=deduplication_config.get('similarity_threshold', 0.85),
+            max_pattern_length=deduplication_config.get('max_pattern_length', 5),
+            window_size=deduplication_config.get('window_size', 3),
+            min_sentence_length=deduplication_config.get('min_sentence_length', 10),
+            enable_fuzzy_matching=deduplication_config.get('enable_fuzzy_matching', True),
+            enable_cyclic_detection=deduplication_config.get('enable_cyclic_detection', True)
+        )
         
         # Initialize preprocessor
         self.preprocessor = Preprocessor(
@@ -359,12 +374,20 @@ class PipelineOrchestrator:
             filtered_segments = self._filter_hallucinations(segments, transcription_result)
             logger.info(f"Filtered to {len(filtered_segments)} segments (removed {len(segments) - len(filtered_segments)} hallucinations)")
             
+            # Stage 4.6: Deduplicate segments
+            self._update_progress(
+                ProcessingStage.DEDUPLICATING,
+                "Removing repetitions and duplicates"
+            )
+            deduplicated_segments = self._deduplicate_segments(filtered_segments)
+            logger.info(f"Deduplicated to {len(deduplicated_segments)} segments (removed {len(filtered_segments) - len(deduplicated_segments)} duplicates)")
+            
             # Stage 5: Preprocess
             self._update_progress(
                 ProcessingStage.PREPROCESSING,
                 f"Cleaning text (intensity: {options.cleaning_intensity})"
             )
-            cleaned_segments = self._preprocess_segments(filtered_segments)
+            cleaned_segments = self._preprocess_segments(deduplicated_segments)
             logger.info(f"Preprocessed {len(cleaned_segments)} segments")
             
             # Stage 6: Merge segments
@@ -491,7 +514,7 @@ class PipelineOrchestrator:
     
     def _transcribe_audio(self, audio_path: str, language: str, speech_segments: Optional[List] = None):
         """
-        Transcribe audio file to text, optionally using only speech segments.
+        Transcribe audio file to text, optionally using VAD segments for smart chunking.
         
         Args:
             audio_path: Path to audio file
@@ -505,12 +528,13 @@ class PipelineOrchestrator:
             raise TranscriptionError("Transcriber not initialized", "initialization")
         
         try:
-            # If we have speech segments, transcribe only those regions
-            if speech_segments:
-                return self._transcribe_with_vad_segments(audio_path, language, speech_segments)
-            else:
-                # Fallback to full audio transcription
-                return self.transcriber.transcribe(audio_path, language=language)
+            # Pass VAD segments to transcriber for smart chunking
+            # The transcriber will use these to determine natural chunk boundaries
+            return self.transcriber.transcribe(
+                audio_path, 
+                language=language,
+                vad_segments=speech_segments
+            )
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             raise TranscriptionError(
@@ -518,107 +542,6 @@ class PipelineOrchestrator:
                 error_type="transcription",
                 recoverable=False
             )
-    
-    def _transcribe_with_vad_segments(self, audio_path: str, language: str, speech_segments: List) -> TranscriptionResult:
-        """
-        Transcribe audio using only VAD-detected speech segments.
-        
-        This method processes each speech segment separately and then combines
-        the results with corrected timestamps.
-        
-        Args:
-            audio_path: Path to audio file
-            language: Language for transcription
-            speech_segments: List of SpeechSegment objects
-            
-        Returns:
-            TranscriptionResult with properly timestamped segments
-        """
-        import torchaudio
-        from pathlib import Path
-        
-        all_segments = []
-        start_time = time.time()
-        
-        try:
-            # Load the full audio
-            wav, sr = torchaudio.load(audio_path)
-            
-            # Convert to mono if stereo
-            if wav.shape[0] > 1:
-                wav = torch.mean(wav, dim=0, keepdim=True)
-            
-            # Process each speech segment
-            for i, speech_seg in enumerate(speech_segments):
-                logger.debug(f"Transcribing speech segment {i+1}/{len(speech_segments)}: "
-                           f"{speech_seg.start_time:.2f}s - {speech_seg.end_time:.2f}s")
-                
-                # Extract audio for this segment
-                start_sample = int(speech_seg.start_time * sr)
-                end_sample = int(speech_seg.end_time * sr)
-                
-                # Ensure we don't go beyond audio bounds
-                start_sample = max(0, start_sample)
-                end_sample = min(wav.shape[1], end_sample)
-                
-                if start_sample >= end_sample:
-                    logger.warning(f"Invalid segment bounds: {start_sample} >= {end_sample}")
-                    continue
-                
-                segment_audio = wav[:, start_sample:end_sample]
-                
-                # Save segment to temporary file
-                temp_segment_path = Path(self.config.temp_directory) / f"segment_{i}.wav"
-                torchaudio.save(str(temp_segment_path), segment_audio, sr)
-                
-                try:
-                    # Transcribe this segment
-                    segment_result = self.transcriber.transcribe(
-                        str(temp_segment_path),
-                        language=language
-                    )
-                    
-                    if segment_result.success and segment_result.segments:
-                        # Adjust timestamps to match original audio
-                        for trans_seg in segment_result.segments:
-                            # Add the speech segment's start time to restore original timestamps
-                            trans_seg.start_time += speech_seg.start_time
-                            trans_seg.end_time += speech_seg.start_time
-                            
-                            # Ensure end_time doesn't exceed speech segment boundary
-                            trans_seg.end_time = min(trans_seg.end_time, speech_seg.end_time)
-                            
-                            all_segments.append(trans_seg)
-                
-                finally:
-                    # Clean up temporary segment file
-                    if temp_segment_path.exists():
-                        temp_segment_path.unlink()
-            
-            # Sort segments by start time
-            all_segments.sort(key=lambda x: x.start_time)
-            
-            # Calculate total duration
-            total_duration = speech_segments[-1].end_time if speech_segments else 0.0
-            
-            processing_time = time.time() - start_time
-            
-            logger.info(f"VAD-based transcription complete: {len(all_segments)} segments from "
-                       f"{len(speech_segments)} speech regions in {processing_time:.1f}s")
-            
-            return TranscriptionResult(
-                success=True,
-                segments=all_segments,
-                total_duration=total_duration,
-                model_used=self.transcriber.config.model_name,
-                processing_time=processing_time
-            )
-            
-        except Exception as e:
-            logger.error(f"VAD-based transcription failed: {e}")
-            # Fallback to full audio transcription
-            logger.info("Falling back to full audio transcription")
-            return self.transcriber.transcribe(audio_path, language=language)
     
     def _filter_hallucinations(
         self,
@@ -700,6 +623,40 @@ class PipelineOrchestrator:
             logger.error(f"Hallucination filtering error: {e}")
             # Filtering errors are recoverable - return original segments
             self.progress.warnings.append(f"Hallucination filtering failed: {str(e)}")
+            return segments
+    
+    def _deduplicate_segments(self, segments: List[TranscriptionSegment]) -> List[TranscriptionSegment]:
+        """
+        Deduplicate segments to remove repetitions and similar content.
+        
+        Args:
+            segments: List of transcription segments
+            
+        Returns:
+            Deduplicated list of segments
+        """
+        if not self.deduplicator:
+            logger.warning("Deduplicator not initialized, skipping deduplication")
+            return segments
+        
+        try:
+            # Store original count for logging
+            original_count = len(segments)
+            
+            # Deduplicate segments
+            deduplicated_segments = self.deduplicator.deduplicate_segments(segments)
+            
+            # Log deduplication results
+            removed_count = original_count - len(deduplicated_segments)
+            if removed_count > 0:
+                logger.info(f"Deduplication removed {removed_count} duplicate/repetitive segments")
+            
+            return deduplicated_segments
+            
+        except Exception as e:
+            logger.error(f"Deduplication error: {e}")
+            # Deduplication errors are recoverable - return original segments
+            self.progress.warnings.append(f"Deduplication failed: {str(e)}")
             return segments
     
     def _preprocess_segments(self, segments: List[TranscriptionSegment]) -> List[TranscriptionSegment]:
@@ -935,6 +892,10 @@ class PipelineOrchestrator:
             
             if self.segment_merger:
                 self.segment_merger.clear_model()
+            
+            # Clear deduplicator if needed (no model to clear, but good practice)
+            if self.deduplicator:
+                logger.debug("Deduplicator cleanup (no resources to release)")
             
             self._cleanup_temp_files()
             

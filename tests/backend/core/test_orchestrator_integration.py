@@ -562,7 +562,7 @@ class TestProcessingProgress:
         assert progress.stage == ProcessingStage.INITIALIZING
         assert progress.progress_percent == 0.0
         assert progress.completed_steps == 0
-        assert progress.total_steps == 8  # Updated: added FILTERING_HALLUCINATIONS stage
+        assert progress.total_steps == 9  # Updated: added DEDUPLICATING stage
         assert len(progress.errors) == 0
         assert len(progress.warnings) == 0
     
@@ -581,15 +581,15 @@ class TestProcessingProgress:
         """Test progress percentage calculation."""
         progress = ProcessingProgress()
         
-        # Test each stage (updated for 8 total steps)
+        # Test each stage (updated for 9 total steps)
         progress.update_stage(ProcessingStage.INITIALIZING)
         assert progress.progress_percent == 0.0
         
         progress.update_stage(ProcessingStage.EXTRACTING_AUDIO)
-        assert progress.progress_percent == pytest.approx(12.5, rel=0.1)  # 1/8 = 12.5%
+        assert progress.progress_percent == pytest.approx(11.1, rel=0.1)  # 1/9 = 11.1%
         
         progress.update_stage(ProcessingStage.TRANSCRIBING)
-        assert progress.progress_percent == pytest.approx(37.5, rel=0.1)  # 3/8 = 37.5%
+        assert progress.progress_percent == pytest.approx(33.3, rel=0.1)  # 3/9 = 33.3%
         
         progress.update_stage(ProcessingStage.COMPLETED)
         assert progress.progress_percent == 100.0

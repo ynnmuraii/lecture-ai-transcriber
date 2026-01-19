@@ -25,6 +25,32 @@ whisper:
     device_map: "auto"      # Automatic device selection
     use_flash_attention: true  # Faster attention computation
   
+  # Generation parameters for quality optimization
+  generation:
+    # Disable conditioning on previous tokens to reduce repetition propagation
+    # Setting this to False prevents the model from being influenced by previous segments
+    condition_on_prev_tokens: false
+    
+    # Compression ratio threshold (lower = more aggressive filtering of repetitions)
+    # Segments with compression ratio above this will be filtered out
+    # Default: 2.4, Optimized: 1.8 for better quality
+    compression_ratio_threshold: 1.8
+    
+    # Log probability threshold (higher = more confident predictions only)
+    # Segments with average log probability below this will be filtered out
+    # Default: -1.0, Optimized: -0.8 for better quality
+    logprob_threshold: -0.8
+    
+    # No speech threshold (lower = more sensitive to speech detection)
+    # Probability threshold for detecting speech vs silence
+    # Default: 0.6, Optimized: 0.5 to catch more speech
+    no_speech_threshold: 0.5
+    
+    # Temperature fallback strategy for better quality
+    # Start with deterministic (0.0), fallback to 0.2, then 0.4 if needed
+    # This helps when the model is uncertain about transcription
+    temperature: [0.0, 0.2, 0.4]
+  
   # Model-specific settings
   models:
     "openai/whisper-tiny":

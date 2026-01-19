@@ -189,6 +189,9 @@ def _run_transcription_sync(task_id: str) -> None:
         # Import processing components
         from backend.core.processing.audio_extractor import AudioExtractor
         from backend.core.processing.transcriber import Transcriber, TranscriberConfig
+        from backend.core.processing.vad_processor import VADProcessor
+        from backend.core.processing.hallucination_filter import HallucinationFilter, HallucinationFilterConfig
+        from backend.core.processing.deduplicator import SegmentDeduplicator
         from backend.core.processing.preprocessor import Preprocessor
         from backend.core.processing.segment_merger import SegmentMerger
         from backend.core.processing.formula_formatter import FormulaFormatter
@@ -205,7 +208,42 @@ def _run_transcription_sync(task_id: str) -> None:
         task.progress = 20.0
         task.message = "Audio extracted. Loading transcription model..."
         
-        # Step 2: Transcribe audio with progress callback
+        # Load raw configuration for VAD/filter/dedup settings
+        raw_config = {}
+        try:
+            import yaml
+
+            config_path = Path("backend/config/config.yaml")
+            with open(config_path, "r", encoding="utf-8") as f:
+                raw_config = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning(f"Failed to load configuration, using defaults: {e}")
+
+        # Step 2: Optional VAD for smart chunking
+        speech_segments = None
+        vad_config = raw_config.get("vad", {})
+        if vad_config.get("enabled", True):
+            try:
+                task.message = "Detecting speech (VAD)..."
+                vad_processor = VADProcessor(
+                    threshold=vad_config.get("threshold", 0.5),
+                    min_speech_duration=vad_config.get("min_speech_duration", 0.25),
+                    min_silence_duration=vad_config.get("min_silence_duration", 0.1),
+                    sample_rate=vad_config.get("sample_rate", 16000),
+                )
+                speech_segments = vad_processor.detect_speech_segments(audio_result.audio_path)
+                speech_segments = vad_processor.validate_segments(speech_segments)
+                speech_segments = vad_processor.merge_close_segments(
+                    speech_segments,
+                    max_gap=vad_config.get("max_merge_gap", 0.5),
+                )
+                if not speech_segments:
+                    speech_segments = None
+            except Exception as e:
+                logger.warning(f"VAD failed, proceeding without it: {e}")
+                speech_segments = None
+
+        # Step 3: Transcribe audio with progress callback
         transcriber_config = TranscriberConfig(
             model_name=task.model,
             language=task.language
@@ -217,17 +255,54 @@ def _run_transcription_sync(task_id: str) -> None:
         
         # Use progress callback for real-time updates
         transcription_result = transcriber.transcribe(
-            audio_result.audio_path, 
+            audio_result.audio_path,
             language=task.language,
-            progress_callback=update_progress
+            progress_callback=update_progress,
+            vad_segments=speech_segments
         )
         
         if not transcription_result.success:
             raise Exception(f"Transcription failed: {transcription_result.error_message}")
         
         segments = transcription_result.segments
-        
+
         task.progress = 70.0
+        task.message = "Filtering hallucinations..."
+
+        # Step 4: Filter hallucinations
+        hallucination_config = raw_config.get("hallucination_filter", {})
+        hallucination_filter = HallucinationFilter(
+            config=HallucinationFilterConfig(
+                compression_ratio_threshold=hallucination_config.get("compression_ratio_threshold", 1.8),
+                logprob_threshold=hallucination_config.get("logprob_threshold", -0.8),
+                enable_blacklist_filter=hallucination_config.get("enable_blacklist_filter", True),
+                enable_pattern_filter=hallucination_config.get("enable_pattern_filter", True),
+                enable_compression_filter=hallucination_config.get("enable_compression_filter", True),
+                enable_logprob_filter=hallucination_config.get("enable_logprob_filter", True),
+                custom_blacklist=hallucination_config.get("custom_blacklist", []),
+            )
+        )
+        segments = hallucination_filter.filter_segments(segments)
+
+        task.progress = 75.0
+        task.message = "Removing repetitions..."
+
+        # Step 5: Deduplicate segments
+        dedup_config = raw_config.get("deduplication", {})
+        try:
+            deduplicator = SegmentDeduplicator(
+                similarity_threshold=dedup_config.get("similarity_threshold", 0.85),
+                max_pattern_length=dedup_config.get("max_pattern_length", 5),
+                window_size=dedup_config.get("window_size", 3),
+                min_sentence_length=dedup_config.get("min_sentence_length", 10),
+                enable_fuzzy_matching=dedup_config.get("enable_fuzzy_matching", True),
+                enable_cyclic_detection=dedup_config.get("enable_cyclic_detection", True),
+            )
+            segments = deduplicator.deduplicate_segments(segments)
+        except Exception as e:
+            logger.warning(f"Deduplication failed, continuing: {e}")
+
+        task.progress = 78.0
         task.message = "Transcription complete. Processing text..."
         
         # Step 3: Clean text with preprocessor

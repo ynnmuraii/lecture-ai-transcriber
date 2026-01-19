@@ -440,7 +440,8 @@ class Transcriber:
     def transcribe(self, audio_path: str, 
                   language: Optional[str] = None,
                   task: Optional[str] = None,
-                  progress_callback: Optional[Callable[[float, str], None]] = None) -> TranscriptionResult:
+                  progress_callback: Optional[Callable[[float, str], None]] = None,
+                  vad_segments: Optional[List] = None) -> TranscriptionResult:
         """
         Transcribe audio file to text with timestamps.
         
@@ -450,6 +451,7 @@ class Transcriber:
             task: Task type ("transcribe" or "translate", overrides config if provided)
             progress_callback: Optional callback function(progress: float, message: str)
                               Called with progress percentage (0-100) and status message
+            vad_segments: Optional list of VAD-detected speech segments for smart chunking
             
         Returns:
             TranscriptionResult with segments and metadata
@@ -513,6 +515,30 @@ class Transcriber:
             if task or self.config.task:
                 generate_kwargs["task"] = task or self.config.task
             
+            # Optimize Whisper parameters to reduce repetitions and hallucinations
+            # Disable conditioning on previous text/tokens to reduce repetition propagation.
+            # HF Whisper uses condition_on_prev_tokens (new) but keep compatibility if name changes.
+            if hasattr(self.pipeline.model.generation_config, "condition_on_prev_tokens"):
+                generate_kwargs["condition_on_prev_tokens"] = False
+            elif hasattr(self.pipeline.model.generation_config, "condition_on_previous_text"):
+                generate_kwargs["condition_on_previous_text"] = False
+            
+            # Set compression ratio threshold (lower = more aggressive filtering of repetitions)
+            # Default is 2.4, we use 1.8 for better quality
+            generate_kwargs["compression_ratio_threshold"] = 1.8
+            
+            # Set log probability threshold (higher = more confident predictions only)
+            # Default is -1.0, we use -0.8 for better quality
+            generate_kwargs["logprob_threshold"] = -0.8
+            
+            # Set no speech threshold (lower = more sensitive to speech)
+            # Default is 0.6, we use 0.5 to catch more speech
+            generate_kwargs["no_speech_threshold"] = 0.5
+            
+            # Temperature fallback strategy for better quality
+            # Start with 0.0 (deterministic), fallback to 0.2, then 0.4 if needed
+            generate_kwargs["temperature"] = (0.0, 0.2, 0.4)
+            
             report_progress(15.0, f"Starting transcription with {self.config.model_name}...")
             
             # Perform chunked transcription with progress tracking
@@ -520,7 +546,8 @@ class Transcriber:
                 audio_path, 
                 audio_duration,
                 generate_kwargs,
-                report_progress
+                report_progress,
+                vad_segments
             )
             
             # Calculate total duration
@@ -561,7 +588,8 @@ class Transcriber:
         audio_path: str,
         audio_duration: Optional[float],
         generate_kwargs: Dict[str, Any],
-        report_progress: Callable[[float, str], None]
+        report_progress: Callable[[float, str], None],
+        vad_segments: Optional[List] = None
     ) -> List[TranscriptionSegment]:
         """
         Perform transcription with chunked progress reporting.
@@ -574,6 +602,7 @@ class Transcriber:
             audio_duration: Duration of audio in seconds (for progress calculation)
             generate_kwargs: Generation kwargs for the pipeline
             report_progress: Function to report progress updates
+            vad_segments: Optional list of VAD-detected speech segments for smart chunking
             
         Returns:
             List of TranscriptionSegment objects
@@ -588,13 +617,15 @@ class Transcriber:
             if audio_duration is None:
                 audio_duration = len(audio_data) / sample_rate
             
-            # Calculate chunk parameters
-            chunk_duration_s = self.config.chunk_length_s  # Default 30 seconds
-            total_samples = len(audio_data)
-            chunk_samples = int(chunk_duration_s * sample_rate)
-            num_chunks = max(1, (total_samples + chunk_samples - 1) // chunk_samples)
+            # Use VAD-based chunking if available, otherwise fall back to fixed-time chunks
+            if vad_segments:
+                logger.info("Using VAD-based smart chunking")
+                chunks = self._create_vad_based_chunks(vad_segments, audio_duration)
+            else:
+                logger.info("Using fixed-time chunking")
+                chunks = self._create_fixed_time_chunks(audio_duration)
             
-            logger.info(f"Processing {audio_duration:.1f}s audio in {num_chunks} chunks")
+            logger.info(f"Processing {audio_duration:.1f}s audio in {len(chunks)} chunks")
             
             all_segments = []
             
@@ -603,23 +634,32 @@ class Transcriber:
             progress_end = 95.0
             progress_range = progress_end - progress_start
             
-            for chunk_idx in range(num_chunks):
-                # Calculate chunk boundaries
-                start_sample = chunk_idx * chunk_samples
-                end_sample = min(start_sample + chunk_samples, total_samples)
+            for chunk_idx, chunk in enumerate(chunks):
+                # Calculate chunk boundaries in samples
+                start_sample = int(chunk['start_time'] * sample_rate)
+                end_sample = int(chunk['end_time'] * sample_rate)
+                
+                # Ensure we don't go beyond audio bounds
+                start_sample = max(0, start_sample)
+                end_sample = min(len(audio_data), end_sample)
+                
+                if start_sample >= end_sample:
+                    logger.warning(f"Invalid chunk bounds: {start_sample} >= {end_sample}")
+                    continue
+                
                 chunk_audio = audio_data[start_sample:end_sample]
                 
                 # Calculate time offset for this chunk
-                time_offset = start_sample / sample_rate
+                time_offset = chunk['start_time']
+                overlap_start_time = chunk.get('overlap_start', chunk['end_time'])
                 
                 # Calculate and report progress
-                chunk_progress = progress_start + (chunk_idx / num_chunks) * progress_range
+                chunk_progress = progress_start + (chunk_idx / len(chunks)) * progress_range
                 elapsed_time = time_offset
-                remaining_time = audio_duration - elapsed_time
                 
                 report_progress(
                     chunk_progress,
-                    f"Transcribing chunk {chunk_idx + 1}/{num_chunks} "
+                    f"Transcribing chunk {chunk_idx + 1}/{len(chunks)} "
                     f"({elapsed_time:.0f}s / {audio_duration:.0f}s)"
                 )
                 
@@ -634,10 +674,19 @@ class Transcriber:
                     chunk_segments = self._process_transcription_result(chunk_result)
                     
                     # Adjust timestamps to account for chunk offset
-                    chunk_end_time = (end_sample / sample_rate)
+                    chunk_end_time = chunk['end_time']
                     for segment in chunk_segments:
                         segment.start_time += time_offset
                         segment.end_time += time_offset
+                        
+                        # Mark segments that are in the overlap region
+                        # These will be candidates for deduplication with next chunk
+                        if segment.start_time >= overlap_start_time:
+                            # Add metadata to indicate this is from overlap region
+                            if not hasattr(segment, 'metadata'):
+                                segment.metadata = {}
+                            segment.metadata['from_overlap'] = True
+                            segment.metadata['chunk_idx'] = chunk_idx
                         
                         # Fix missing or invalid end timestamps
                         if segment.end_time <= segment.start_time:
@@ -670,6 +719,126 @@ class Transcriber:
             logger.error(f"Chunked transcription failed: {e}")
             # Fallback to non-chunked transcription
             return self._transcribe_non_chunked(audio_path, generate_kwargs, report_progress)
+    
+    def _create_vad_based_chunks(
+        self,
+        vad_segments: List,
+        audio_duration: float,
+        max_chunk_duration: float = 30.0,
+        min_chunk_duration: float = 5.0,
+        overlap_duration: float = 1.0
+    ) -> List[Dict[str, float]]:
+        """
+        Create chunks based on VAD-detected speech segments with overlap.
+        
+        This method groups speech segments into chunks, using natural pauses
+        as chunk boundaries. Chunks overlap to prevent word cutting at boundaries.
+        
+        Args:
+            vad_segments: List of VAD-detected speech segments
+            audio_duration: Total audio duration in seconds
+            max_chunk_duration: Maximum duration for a single chunk
+            min_chunk_duration: Minimum duration for a single chunk
+            overlap_duration: Duration of overlap between chunks (seconds)
+            
+        Returns:
+            List of chunk dictionaries with 'start_time', 'end_time', and 'overlap_start'
+        """
+        if not vad_segments:
+            # Fallback to fixed-time chunks if no VAD segments
+            return self._create_fixed_time_chunks(audio_duration, max_chunk_duration, overlap_duration)
+        
+        chunks = []
+        current_chunk_start = vad_segments[0].start_time
+        current_chunk_end = vad_segments[0].end_time
+        
+        for i, segment in enumerate(vad_segments):
+            # Check if we should start a new chunk
+            chunk_duration = segment.end_time - current_chunk_start
+            
+            # Start new chunk if:
+            # 1. Current chunk would exceed max duration
+            # 2. There's a significant pause (>2s) before this segment
+            should_split = False
+            
+            if chunk_duration > max_chunk_duration:
+                should_split = True
+            elif i > 0:
+                pause_duration = segment.start_time - vad_segments[i-1].end_time
+                if pause_duration > 2.0:  # Significant pause
+                    should_split = True
+            
+            if should_split and (current_chunk_end - current_chunk_start) >= min_chunk_duration:
+                # Save current chunk with overlap extension
+                chunk_end_with_overlap = min(current_chunk_end + overlap_duration, audio_duration)
+                chunks.append({
+                    'start_time': current_chunk_start,
+                    'end_time': chunk_end_with_overlap,
+                    'overlap_start': current_chunk_end  # Mark where overlap begins
+                })
+                
+                # Start new chunk with overlap from previous chunk
+                current_chunk_start = max(0, segment.start_time - overlap_duration)
+                current_chunk_end = segment.end_time
+            else:
+                # Extend current chunk
+                current_chunk_end = segment.end_time
+        
+        # Add the last chunk
+        if current_chunk_end - current_chunk_start >= min_chunk_duration:
+            chunk_end_with_overlap = min(current_chunk_end + overlap_duration, audio_duration)
+            chunks.append({
+                'start_time': current_chunk_start,
+                'end_time': chunk_end_with_overlap,
+                'overlap_start': current_chunk_end
+            })
+        
+        logger.info(f"Created {len(chunks)} VAD-based chunks with {overlap_duration}s overlap "
+                   f"from {len(vad_segments)} speech segments")
+        return chunks
+    
+    def _create_fixed_time_chunks(
+        self,
+        audio_duration: float,
+        chunk_duration_s: Optional[float] = None,
+        overlap_duration: float = 1.0
+    ) -> List[Dict[str, float]]:
+        """
+        Create fixed-time chunks with overlap as fallback.
+        
+        Args:
+            audio_duration: Total audio duration in seconds
+            chunk_duration_s: Duration of each chunk (uses config default if None)
+            overlap_duration: Duration of overlap between chunks (seconds)
+            
+        Returns:
+            List of chunk dictionaries with 'start_time', 'end_time', and 'overlap_start'
+        """
+        if chunk_duration_s is None:
+            chunk_duration_s = self.config.chunk_length_s
+        
+        chunks = []
+        current_time = 0.0
+        
+        while current_time < audio_duration:
+            chunk_end = min(current_time + chunk_duration_s, audio_duration)
+            
+            # Add overlap to chunk end (except for last chunk)
+            chunk_end_with_overlap = chunk_end
+            if chunk_end < audio_duration:
+                chunk_end_with_overlap = min(chunk_end + overlap_duration, audio_duration)
+            
+            chunks.append({
+                'start_time': current_time,
+                'end_time': chunk_end_with_overlap,
+                'overlap_start': chunk_end  # Mark where overlap begins
+            })
+            
+            # Move to next chunk, accounting for overlap
+            current_time = chunk_end
+        
+        logger.info(f"Created {len(chunks)} fixed-time chunks with {overlap_duration}s overlap")
+        return chunks
     
     def _transcribe_non_chunked(
         self,
@@ -710,10 +879,13 @@ class Transcriber:
         segments: List[TranscriptionSegment]
     ) -> List[TranscriptionSegment]:
         """
-        Merge segments that were split at chunk boundaries.
+        Merge segments that were split at chunk boundaries with smart deduplication.
         
-        When audio is processed in chunks, words may be split across chunk
-        boundaries. This method attempts to merge such segments.
+        When audio is processed in chunks with overlap, segments may appear in
+        multiple chunks. This method:
+        1. Removes duplicate segments from overlap regions
+        2. Merges segments split across chunk boundaries
+        3. Handles incomplete words at boundaries
         
         Args:
             segments: List of segments to merge
@@ -724,20 +896,37 @@ class Transcriber:
         if len(segments) <= 1:
             return segments
         
+        # Sort segments by start time
+        segments = sorted(segments, key=lambda x: x.start_time)
+        
         merged = []
         i = 0
         
         while i < len(segments):
             current = segments[i]
             
-            # Check if this segment should be merged with the next
+            # Check if there's a next segment to potentially merge with
             if i + 1 < len(segments):
                 next_seg = segments[i + 1]
                 
-                # Merge if segments are very close in time (within 0.1 seconds)
-                # and the current segment ends with an incomplete word
+                # Calculate time gap between segments
                 time_gap = next_seg.start_time - current.end_time
                 
+                # Check if segments overlap (from chunk overlap regions)
+                time_overlap = current.end_time - next_seg.start_time
+                
+                # Case 1: Segments overlap significantly (likely duplicates from chunk overlap)
+                if time_overlap > 0.5:  # More than 0.5s overlap
+                    # Check text similarity to detect duplicates
+                    if self._are_segments_similar(current, next_seg):
+                        # Keep the segment with higher confidence or better quality
+                        better_segment = self._choose_better_segment(current, next_seg)
+                        merged.append(better_segment)
+                        i += 2  # Skip both segments
+                        logger.debug(f"Removed duplicate segment at {current.start_time:.1f}s")
+                        continue
+                
+                # Case 2: Segments are very close and should be merged
                 if time_gap < 0.1 and self._should_merge_segments(current, next_seg):
                     # Merge the segments
                     merged_text = current.text.rstrip() + " " + next_seg.text.lstrip()
@@ -749,12 +938,112 @@ class Transcriber:
                     )
                     merged.append(merged_segment)
                     i += 2  # Skip both segments
+                    logger.debug(f"Merged boundary segments at {current.start_time:.1f}s")
+                    continue
+                
+                # Case 3: Check for partial overlap with different content
+                if 0 < time_overlap < 0.5:
+                    # Segments partially overlap but have different content
+                    # Adjust boundaries to remove overlap
+                    adjusted_current = TranscriptionSegment(
+                        text=current.text,
+                        start_time=current.start_time,
+                        end_time=next_seg.start_time,  # End where next begins
+                        confidence=current.confidence
+                    )
+                    merged.append(adjusted_current)
+                    i += 1
+                    logger.debug(f"Adjusted overlapping segment at {current.start_time:.1f}s")
                     continue
             
+            # No merging needed, add current segment
             merged.append(current)
             i += 1
         
+        logger.info(f"Merged {len(segments)} segments into {len(merged)} segments "
+                   f"(removed {len(segments) - len(merged)} duplicates/overlaps)")
         return merged
+    
+    def _are_segments_similar(
+        self,
+        seg1: TranscriptionSegment,
+        seg2: TranscriptionSegment,
+        similarity_threshold: float = 0.8
+    ) -> bool:
+        """
+        Check if two segments are similar (likely duplicates).
+        
+        Uses Levenshtein distance to compare segment texts.
+        
+        Args:
+            seg1: First segment
+            seg2: Second segment
+            similarity_threshold: Threshold for considering segments similar (0-1)
+            
+        Returns:
+            True if segments are similar enough to be considered duplicates
+        """
+        text1 = seg1.text.strip().lower()
+        text2 = seg2.text.strip().lower()
+        
+        # If texts are identical, they're definitely similar
+        if text1 == text2:
+            return True
+        
+        # If one is much shorter than the other, they're probably not duplicates
+        len_ratio = min(len(text1), len(text2)) / max(len(text1), len(text2))
+        if len_ratio < 0.5:
+            return False
+        
+        # Calculate Levenshtein distance
+        try:
+            from difflib import SequenceMatcher
+            similarity = SequenceMatcher(None, text1, text2).ratio()
+            return similarity >= similarity_threshold
+        except Exception as e:
+            logger.warning(f"Error calculating text similarity: {e}")
+            # Fallback: check if one text contains most of the other
+            shorter = text1 if len(text1) < len(text2) else text2
+            longer = text2 if len(text1) < len(text2) else text1
+            return shorter in longer
+    
+    def _choose_better_segment(
+        self,
+        seg1: TranscriptionSegment,
+        seg2: TranscriptionSegment
+    ) -> TranscriptionSegment:
+        """
+        Choose the better segment from two similar segments.
+        
+        Prefers segments with:
+        1. Higher confidence
+        2. More complete text (longer)
+        3. Better timestamp accuracy
+        
+        Args:
+            seg1: First segment
+            seg2: Second segment
+            
+        Returns:
+            The better segment
+        """
+        # Prefer segment with higher confidence
+        if seg1.confidence != seg2.confidence:
+            return seg1 if seg1.confidence > seg2.confidence else seg2
+        
+        # Prefer segment with longer text (more complete)
+        if len(seg1.text) != len(seg2.text):
+            return seg1 if len(seg1.text) > len(seg2.text) else seg2
+        
+        # Prefer segment not marked as from overlap region
+        seg1_from_overlap = getattr(seg1, 'metadata', {}).get('from_overlap', False)
+        seg2_from_overlap = getattr(seg2, 'metadata', {}).get('from_overlap', False)
+        
+        if seg1_from_overlap != seg2_from_overlap:
+            return seg2 if seg1_from_overlap else seg1
+        
+        # Default: return first segment
+        return seg1
     
     def _should_merge_segments(
         self,
