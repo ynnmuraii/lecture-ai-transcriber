@@ -229,6 +229,30 @@ class SqlJobRepository(JobRepository):
                 record.completed_at = _utcnow()
             session.commit()
 
+    def mark_failed(
+        self,
+        job_id: UUID,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        with self._session_factory() as session:
+            record = session.get(JobRecord, str(job_id), with_for_update=True)
+            if record is None:
+                return
+            current_status = JobStatus(record.status)
+            if current_status in {
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+                JobStatus.COMPLETED_WITH_WARNINGS,
+            }:
+                return
+            record.status = JobStatus.FAILED.value
+            record.error_code = error_code
+            record.error_message = error_message
+            record.completed_at = _utcnow()
+            session.commit()
+
     def request_cancel(self, job_id: UUID) -> bool:
         with self._session_factory() as session:
             record = session.get(JobRecord, str(job_id), with_for_update=True)

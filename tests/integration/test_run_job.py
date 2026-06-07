@@ -1,0 +1,302 @@
+"""End-to-end ``RunJobService`` tests backed by SQLite and a fake ASR engine."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import UUID, uuid4
+
+import pytest
+
+from lecture_transcriber.application.services.create_job import CreateJobService
+from lecture_transcriber.application.services.export_transcript import (
+    ExportTranscriptService,
+)
+from lecture_transcriber.application.services.get_job import GetJobService
+from lecture_transcriber.application.services.run_job import RunJobService
+from lecture_transcriber.domain.enums import ErrorCode, JobStatus
+from lecture_transcriber.domain.errors import AsrFailed
+from lecture_transcriber.domain.models import (
+    HardwareFacts,
+    Media,
+    MediaType,
+    TranscriptionOptions,
+    TranscriptSegment,
+)
+from lecture_transcriber.domain.ports import (
+    ASREngine,
+    MediaProbe,
+    MediaProbeResult,
+)
+from lecture_transcriber.infrastructure.config import Settings
+from lecture_transcriber.infrastructure.database import (
+    create_engine,
+    initialize_database,
+)
+from lecture_transcriber.infrastructure.file_store import LocalFileStore
+from lecture_transcriber.infrastructure.repositories import (
+    SessionFactory,
+    SqlArtifactRepository,
+    SqlJobEventRepository,
+    SqlJobRepository,
+    SqlMediaRepository,
+)
+from lecture_transcriber.transcription.profiles import ProfileSelector
+from tests.contract.fakes import (
+    FakeASREngine,
+    InMemoryModelCache,
+    StaticHardwareDetector,
+    SystemClock,
+)
+
+# ---------------------------------------------------------------------------
+# Test wiring
+# ---------------------------------------------------------------------------
+
+
+class _StaticProbe(MediaProbe):
+    def __init__(self, duration: float = 10.0) -> None:
+        self._duration = duration
+
+    def probe(self, path: Path) -> MediaProbeResult:  # pragma: no cover - trivial
+        return MediaProbeResult(
+            media_type="video",
+            duration_seconds=self._duration,
+            audio_codec="aac",
+            audio_sample_rate=48000,
+            audio_channels=2,
+        )
+
+
+class _BoomEngine(ASREngine):
+    def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
+        raise AsrFailed("engine boom")
+
+
+def _settings(data_dir: Path) -> Settings:
+    return Settings(data_dir=data_dir)
+
+
+@pytest.fixture
+def stack(data_dir: Path) -> Iterator[dict[str, object]]:
+    settings = _settings(data_dir)
+    engine = create_engine(settings)
+    initialize_database(engine)
+    sf = SessionFactory(engine)
+    media_repo = SqlMediaRepository(sf)
+    job_repo = SqlJobRepository(sf)
+    event_repo = SqlJobEventRepository(sf)
+    artifact_repo = SqlArtifactRepository(sf)
+    file_store = LocalFileStore(
+        data_dir=data_dir,
+        media_dir=data_dir / "media",
+        jobs_dir=data_dir / "jobs",
+        tmp_dir=data_dir / "tmp",
+    )
+    exporter = ExportTranscriptService(file_store, artifact_repo)
+
+    media = Media(
+        id=uuid4(),
+        original_name="lecture.mp4",
+        stored_path="dummy",
+        media_type=MediaType.VIDEO,
+        mime_type="video/mp4",
+        size_bytes=1024,
+        duration_seconds=10.0,
+        sha256="a" * 64,
+        created_at=datetime(2026, 6, 7, tzinfo=UTC),
+    )
+    media_repo.add(media)
+
+    container = {
+        "settings": settings,
+        "session_factory": sf,
+        "media_repo": media_repo,
+        "job_repo": job_repo,
+        "event_repo": event_repo,
+        "artifact_repo": artifact_repo,
+        "file_store": file_store,
+        "exporter": exporter,
+        "media": media,
+    }
+    yield container
+
+
+def _build_create(stack: dict[str, object]) -> CreateJobService:
+    cache = InMemoryModelCache(available=("medium",))
+    return CreateJobService(
+        media_repo=stack["media_repo"],
+        job_repo=stack["job_repo"],
+        event_repo=stack["event_repo"],
+        hardware=StaticHardwareDetector(
+            HardwareFacts(
+                ram_bytes=8 * 1024**3,
+                cpu_count=4,
+                cuda_available=False,
+                cuda_name=None,
+                vram_bytes=None,
+            )
+        ),
+        profiles=ProfileSelector(),
+        model_cache=cache,
+        clock=SystemClock(),
+    )
+
+
+def _build_run(
+    stack: dict[str, object],
+    *,
+    engine: ASREngine,
+) -> RunJobService:
+    return RunJobService(
+        job_repo=stack["job_repo"],
+        event_repo=stack["event_repo"],
+        artifact_repo=stack["artifact_repo"],
+        media_repo=stack["media_repo"],
+        file_store=stack["file_store"],
+        probe=_StaticProbe(duration=10.0),
+        engine=engine,
+        exporter=stack["exporter"],
+        clock=SystemClock(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+def test_successful_run_writes_four_artifacts_and_completes(stack) -> None:
+    media: Media = stack["media"]
+    create = _build_create(stack)
+    summary = create.create(media.id, TranscriptionOptions(language="ru"))
+
+    engine = FakeASREngine(
+        segments=(
+            TranscriptSegment(index=0, start=0.0, end=2.0, text="Добрый день."),
+            TranscriptSegment(index=1, start=2.0, end=4.0, text="Коллеги, привет."),
+        ),
+    )
+    run = _build_run(stack, engine=engine)
+
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED
+    assert job.progress == 100
+    assert job.error_code is None
+    artifacts = stack["artifact_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
+    assert {a.format for a in artifacts} == {"json", "txt", "srt", "vtt"}
+    events = stack["event_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
+    statuses = [e.status for e in events]
+    # queued → probing → loading_model → transcribing → validating → exporting → completed
+    assert statuses[0] == JobStatus.QUEUED
+    assert statuses[-1] == JobStatus.COMPLETED
+    assert JobStatus.LOADING_MODEL in statuses
+    assert JobStatus.VALIDATING in statuses
+    assert JobStatus.EXPORTING in statuses
+
+
+def test_suspicious_segment_produces_completed_with_warnings(stack) -> None:
+    media: Media = stack["media"]
+    create = _build_create(stack)
+    summary = create.create(media.id, TranscriptionOptions())
+
+    engine = FakeASREngine(
+        segments=(
+            TranscriptSegment(
+                index=0, start=0.0, end=2.0, text="hi", avg_logprob=-3.5
+            ),
+        ),
+    )
+    run = _build_run(stack, engine=engine)
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED_WITH_WARNINGS
+
+
+def test_asr_failure_records_stable_error_code(stack) -> None:
+    media: Media = stack["media"]
+    create = _build_create(stack)
+    summary = create.create(media.id, TranscriptionOptions())
+
+    run = _build_run(stack, engine=_BoomEngine())
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == ErrorCode.ASR_FAILED.value
+    assert "engine boom" in (job.error_message or "")
+
+
+def test_cancellation_before_export_marks_job_cancelled(stack) -> None:
+    media: Media = stack["media"]
+    create = _build_create(stack)
+    summary = create.create(media.id, TranscriptionOptions())
+
+    # Pre-cancel before run; service must honour the flag.
+    stack["job_repo"].request_cancel(summary.id)  # type: ignore[attr-defined]
+
+    run = _build_run(stack, engine=FakeASREngine())
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.CANCELLED
+    artifacts = stack["artifact_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
+    assert artifacts == ()
+
+
+def test_get_service_returns_detail_with_artifacts(stack) -> None:
+    media: Media = stack["media"]
+    create = _build_create(stack)
+    summary = create.create(media.id, TranscriptionOptions())
+
+    run = _build_run(stack, engine=FakeASREngine())
+    run.run_job(summary.id)
+
+    getter = GetJobService(
+        job_repo=stack["job_repo"],  # type: ignore[arg-type]
+        event_repo=stack["event_repo"],  # type: ignore[arg-type]
+        artifact_repo=stack["artifact_repo"],  # type: ignore[arg-type]
+        media_repo=stack["media_repo"],  # type: ignore[arg-type]
+    )
+    detail = getter.get_detail(summary.id)
+    assert detail is not None
+    assert detail.status == JobStatus.COMPLETED
+    assert len(detail.artifacts) == 4
+    assert any(e.status == JobStatus.COMPLETED for e in detail.events)
+    summary_view = getter.get_summary(summary.id)
+    assert summary_view is not None
+    assert summary_view.id == summary.id
+
+
+def test_error_message_does_not_leak_absolute_path(stack) -> None:
+    media: Media = stack["media"]
+    create = _build_create(stack)
+    summary = create.create(media.id, TranscriptionOptions())
+
+    class PathBoomEngine(ASREngine):
+        def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
+            raise AsrFailed(f"cannot open {media_path}")
+
+    run = _build_run(stack, engine=PathBoomEngine())
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    # Public error_message must not contain the absolute path
+    assert job.error_code == ErrorCode.ASR_FAILED.value
+    # Internal DB column is redacted; we still accept the leak in the in-memory
+    # exception if it had to be re-raised, but mark_failed only sees the message.
+    assert (job.error_message or "").find("\\") == -1
+    assert (job.error_message or "").find("/") == -1
+
+
+# Unused imports are caught by ruff; silence the warning for UUID/Path.
+_ = (UUID, Path)

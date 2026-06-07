@@ -173,8 +173,19 @@ class InMemoryJobRepository(JobRepository):
     ) -> None:
         job = self._jobs[job_id]
         if not job.is_terminal():
-            job.transition_to(status)
+            job.transition_to(status, message=message)
         job.update_progress(progress, message=message)
+
+    def mark_failed(
+        self,
+        job_id: UUID,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        job = self._jobs.get(job_id)
+        if not job or job.is_terminal():
+            return
+        job.mark_failed(error_code, error_message)
 
     def request_cancel(self, job_id: UUID) -> bool:
         job = self._jobs.get(job_id)
