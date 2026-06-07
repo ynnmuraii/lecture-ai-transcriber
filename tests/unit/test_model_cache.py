@@ -17,13 +17,18 @@ from lecture_transcriber.infrastructure.model_cache import (
 
 def test_is_available_recognises_hf_snapshot_layout(tmp_path: Path) -> None:
     snap = _hf_snapshot_dir(tmp_path, "medium")
-    snap.mkdir(parents=True)
+    payload = snap / "snapshots" / "revision"
+    payload.mkdir(parents=True)
+    (payload / "config.json").write_text("{}")
+    (payload / "model.bin").write_bytes(b"weights")
     cache = FilesystemModelCache(model_dir=tmp_path)
     assert cache.is_available("medium") is True
 
 
 def test_is_available_recognises_flat_layout(tmp_path: Path) -> None:
     (tmp_path / "tiny").mkdir()
+    (tmp_path / "tiny" / "config.json").write_text("{}")
+    (tmp_path / "tiny" / "model.bin").write_bytes(b"weights")
     cache = FilesystemModelCache(model_dir=tmp_path)
     assert cache.is_available("tiny") is True
 
@@ -35,11 +40,15 @@ def test_is_available_returns_false_when_missing(tmp_path: Path) -> None:
 
 def test_list_models_translates_hf_names_to_user_names(tmp_path: Path) -> None:
     snap_medium = _hf_snapshot_dir(tmp_path, "medium")
-    snap_medium.mkdir(parents=True)
-    (snap_medium / "config.json").write_text("{}")
+    medium_payload = snap_medium / "snapshots" / "revision"
+    medium_payload.mkdir(parents=True)
+    (medium_payload / "config.json").write_text("{}")
+    (medium_payload / "model.bin").write_bytes(b"weights")
     snap_small = _hf_snapshot_dir(tmp_path, "small")
-    snap_small.mkdir(parents=True)
-    (snap_small / "config.json").write_text("{}")
+    small_payload = snap_small / "snapshots" / "revision"
+    small_payload.mkdir(parents=True)
+    (small_payload / "config.json").write_text("{}")
+    (small_payload / "model.bin").write_bytes(b"weights")
     cache = FilesystemModelCache(model_dir=tmp_path)
     names = sorted(m.name for m in cache.list_models())
     assert names == ["medium", "small"]
@@ -53,3 +62,10 @@ def test_download_raises_in_offline_mode(tmp_path: Path) -> None:
 
     with pytest.raises(ModelNotAvailable):
         cache.download("medium")
+
+
+def test_empty_hf_cache_directory_is_not_a_model(tmp_path: Path) -> None:
+    _hf_snapshot_dir(tmp_path, "medium").mkdir(parents=True)
+    cache = FilesystemModelCache(model_dir=tmp_path)
+
+    assert cache.is_available("medium") is False

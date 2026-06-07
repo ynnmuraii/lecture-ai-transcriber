@@ -19,6 +19,7 @@ from lecture_transcriber.domain.models import (
     Artifact,
     EngineMetadata,
     HardwareFacts,
+    HardwareProfile,
     JobEvent,
     LanguageMetadata,
     Media,
@@ -150,6 +151,13 @@ class ASRResult:
 
 @runtime_checkable
 class ASREngine(Protocol):
+    def prepare(
+        self,
+        profile: HardwareProfile,
+        options: TranscriptionOptions,
+        is_cancelled: Callable[[], bool],
+    ) -> None: ...
+
     def transcribe(
         self,
         media_path: Path,

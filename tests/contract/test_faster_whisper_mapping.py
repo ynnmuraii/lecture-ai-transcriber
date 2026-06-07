@@ -22,7 +22,7 @@ from lecture_transcriber.domain.errors import (
     JobLeaseLost,
     ModelLoadFailed,
 )
-from lecture_transcriber.domain.models import TranscriptionOptions
+from lecture_transcriber.domain.models import HardwareProfile, TranscriptionOptions
 from lecture_transcriber.transcription.faster_whisper_engine import (
     FasterWhisperEngine,
     WhisperRuntimeFactory,
@@ -92,12 +92,14 @@ def _factory(runtime: _FakeRuntime) -> WhisperRuntimeFactory:
         model_name: str,
         device: str,
         compute_type: str,
+        cpu_threads: int,
         download_root: str,
         local_files_only: bool,
     ) -> _FakeRuntime:
         runtime.model_name = model_name
         runtime.device = device
         runtime.compute_type = compute_type
+        runtime.cpu_threads = cpu_threads
         runtime.download_root = download_root
         runtime.local_files_only = local_files_only
         return runtime
@@ -151,6 +153,73 @@ def _options(**overrides: object) -> TranscriptionOptions:
     return TranscriptionOptions(**base)  # type: ignore[arg-type]
 
 
+def _profile(
+    *,
+    model: str = "small",
+    device: str = "cpu",
+    compute_type: str = "int8",
+    cpu_threads: int = 4,
+) -> HardwareProfile:
+    return HardwareProfile(
+        name="test",
+        device=device,  # type: ignore[arg-type]
+        compute_type=compute_type,
+        model=model,
+        cpu_threads=cpu_threads,
+        batch_size=1,
+        reason="test",
+    )
+
+
+def test_prepare_uses_selected_hardware_profile_and_local_cache(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(
+        segments=(_sdk_segment(start=0.0, end=1.0, text="a"),)
+    )
+    engine = FasterWhisperEngine(
+        model_dir=tmp_path,
+        offline=False,
+        runtime_factory=_factory(runtime),
+    )
+
+    engine.prepare(
+        _profile(
+            model="medium",
+            device="cuda",
+            compute_type="int8_float16",
+            cpu_threads=6,
+        ),
+        _options(model_override="medium"),
+        lambda: False,
+    )
+
+    assert runtime.model_name == "medium"
+    assert runtime.device == "cuda"
+    assert runtime.compute_type == "int8_float16"
+    assert runtime.cpu_threads == 6
+    assert runtime.local_files_only is True
+
+
+def test_prepare_observes_cancellation_after_model_load(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(segments=())
+    cancelled = False
+
+    def factory(*args: object, **kwargs: object) -> _FakeRuntime:
+        nonlocal cancelled
+        cancelled = True
+        return runtime
+
+    engine = FasterWhisperEngine(
+        model_dir=tmp_path,
+        offline=False,
+        runtime_factory=factory,
+    )
+
+    with pytest.raises(JobCancelled):
+        engine.prepare(_profile(), _options(), lambda: cancelled)
+
+
 def test_first_call_loads_one_model_and_reuses_on_second_call(tmp_path: Path) -> None:
     runtime = _FakeRuntime(segments=(_sdk_segment(start=0.0, end=1.0, text="привет"),))
     engine = FasterWhisperEngine(
@@ -174,6 +243,7 @@ def test_changed_model_triggers_reload(tmp_path: Path) -> None:
         model_name: str,
         device: str,
         compute_type: str,
+        cpu_threads: int,
         download_root: str,
         local_files_only: bool,
     ) -> _FakeRuntime:
@@ -198,15 +268,16 @@ def test_local_files_only_reflects_offline_setting(tmp_path: Path) -> None:
     engine.transcribe(tmp_path / "a.wav", _options(), lambda _s: None, lambda: False)
     assert runtime.local_files_only is True
 
+    online_runtime = _FakeRuntime(())
     engine_offline = FasterWhisperEngine(
-        model_dir=tmp_path, offline=False, runtime_factory=_factory(_FakeRuntime(()))
+        model_dir=tmp_path,
+        offline=False,
+        runtime_factory=_factory(online_runtime),
     )
     engine_offline.transcribe(
         tmp_path / "a.wav", _options(), lambda _s: None, lambda: False
     )
-    # The second engine kept the offline=True default; this is the production
-    # path. The unit under test is that the flag is wired through.
-    assert engine_offline._offline is False  # type: ignore[attr-defined]
+    assert online_runtime.local_files_only is True
 
 
 def test_cancellation_raises_job_cancelled(tmp_path: Path) -> None:

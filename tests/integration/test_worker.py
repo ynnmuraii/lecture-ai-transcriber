@@ -271,6 +271,9 @@ def test_one_failed_job_does_not_kill_the_loop(stack) -> None:
         def __init__(self, fail_for: object) -> None:
             self._fail_for = fail_for
 
+        def prepare(self, profile, options, is_cancelled):  # type: ignore[no-untyped-def]
+            return None
+
         def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
             if media_path == self._fail_for:
                 raise AsrFailed("boom")

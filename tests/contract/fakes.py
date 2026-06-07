@@ -10,6 +10,7 @@ from typing import BinaryIO
 from uuid import UUID, uuid4
 
 from lecture_transcriber.domain.enums import JobStatus
+from lecture_transcriber.domain.errors import JobCancelled
 from lecture_transcriber.domain.models import (
     Artifact,
     EngineMetadata,
@@ -82,6 +83,19 @@ class FakeASREngine(ASREngine):
         self._compute_type = compute_type
         self._source_duration = source_duration
         self._vad_duration = vad_duration
+
+    def prepare(
+        self,
+        profile: HardwareProfile,
+        options: TranscriptionOptions,
+        is_cancelled: Callable[[], bool],
+    ) -> None:
+        del options
+        if is_cancelled():
+            raise JobCancelled("cancelled while preparing fake ASR")
+        self._model = profile.model
+        self._device = profile.device
+        self._compute_type = profile.compute_type
 
     def transcribe(
         self,

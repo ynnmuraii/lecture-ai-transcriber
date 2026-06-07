@@ -15,6 +15,7 @@ def _make_model_dir(tmp_path: Path) -> Path:
     d.mkdir()
     (d / "small").mkdir()
     (d / "small" / "config.json").write_text("{}")
+    (d / "small" / "model.bin").write_bytes(b"weights")
     return d
 
 
@@ -33,10 +34,15 @@ def test_offline_download_is_rejected_with_command(tmp_path: Path) -> None:
 
 
 def test_online_download_invokes_downloader(tmp_path: Path) -> None:
+    def downloader(model: str, target: Path) -> None:
+        target.mkdir()
+        (target / "config.json").write_text("{}")
+        (target / "model.bin").write_bytes(b"weights")
+
     cache = FilesystemModelCache(
         _make_model_dir(tmp_path),
         offline=False,
-        downloader=lambda model, target: target.mkdir(),
+        downloader=downloader,
     )
     model = cache.download("medium")
     assert model.name == "medium"
@@ -57,3 +63,13 @@ def test_is_available_does_not_call_downloader(tmp_path: Path) -> None:
     cache.is_available("small")
     cache.list_models()
     assert calls == []
+
+
+def test_incomplete_model_directory_is_not_available(tmp_path: Path) -> None:
+    model_dir = tmp_path / "models"
+    (model_dir / "small").mkdir(parents=True)
+    (model_dir / "small" / "config.json").write_text("{}")
+    cache = FilesystemModelCache(model_dir, offline=True)
+
+    assert cache.is_available("small") is False
+    assert cache.list_models() == ()

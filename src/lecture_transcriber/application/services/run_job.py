@@ -159,7 +159,13 @@ class RunJobService:
             return
 
         try:
-            self._step_loading_model(job_id, media, worker_id, lease_lost)
+            self._step_loading_model(
+                job_id,
+                media,
+                job,
+                worker_id,
+                lease_lost,
+            )
             segments, result_engine, result_language, vad_dur = self._step_transcribing(
                 job_id,
                 media,
@@ -208,6 +214,7 @@ class RunJobService:
         self,
         job_id: UUID,
         media: Media,
+        job: TranscriptionJob,
         worker_id: str,
         lease_lost: Callable[[], bool],
     ) -> None:
@@ -229,6 +236,14 @@ class RunJobService:
             JobStatus.LOADING_MODEL,
             progress=20,
             message="preparing model",
+        )
+        self._raise_if_stopped(job_id, worker_id, lease_lost)
+        if job.effective_profile is None:
+            raise ModelLoadFailed("job has no effective hardware profile")
+        self._engine.prepare(
+            job.effective_profile,
+            job.options,
+            lambda: self._job_repo.is_cancel_requested(job_id),
         )
         self._raise_if_stopped(job_id, worker_id, lease_lost)
         self._advance(

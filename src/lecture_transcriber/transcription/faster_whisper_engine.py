@@ -24,6 +24,7 @@ from lecture_transcriber.domain.errors import (
 )
 from lecture_transcriber.domain.models import (
     EngineMetadata,
+    HardwareProfile,
     LanguageMetadata,
     TranscriptionOptions,
     TranscriptSegment,
@@ -48,6 +49,7 @@ class WhisperRuntimeFactory(Protocol):
         model_name: str,
         device: str,
         compute_type: str,
+        cpu_threads: int,
         download_root: str,
         local_files_only: bool,
     ) -> Any: ...
@@ -57,6 +59,7 @@ def default_runtime_factory(
     model_name: str,
     device: str,
     compute_type: str,
+    cpu_threads: int,
     download_root: str,
     local_files_only: bool,
 ) -> Any:
@@ -69,6 +72,7 @@ def default_runtime_factory(
         model_name,
         device=device,
         compute_type=compute_type,
+        cpu_threads=cpu_threads,
         download_root=download_root,
         local_files_only=local_files_only,
     )
@@ -108,13 +112,27 @@ class FasterWhisperEngine(ASREngine):
         runtime_factory: WhisperRuntimeFactory = default_runtime_factory,
     ) -> None:
         self._model_dir = model_dir
-        self._offline = offline
+        del offline
         self._runtime_factory = runtime_factory
         self._model_name: str | None = None
+        self._runtime_key: tuple[str, str, str, int] | None = None
         self._runtime: Any = None
         self._lock = threading.Lock()
 
     # ----------------------------------------------------------- public API
+
+    def prepare(
+        self,
+        profile: HardwareProfile,
+        options: TranscriptionOptions,
+        is_cancelled: Callable[[], bool],
+    ) -> None:
+        del options
+        if is_cancelled():
+            raise JobCancelled("cancelled before model load")
+        self._ensure_model(profile)
+        if is_cancelled():
+            raise JobCancelled("cancelled during model load")
 
     def transcribe(
         self,
@@ -132,10 +150,38 @@ class FasterWhisperEngine(ASREngine):
                 "speech_pad_ms": options.vad_speech_pad_ms,
             }
 
-        device = "cuda" if self._cuda_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-        model_name = options.model_override or self._default_model()
-        self._ensure_model(model_name, device=device, compute_type=compute_type)
+        if self._runtime_key is None:
+            self.prepare(
+                HardwareProfile(
+                    name="fallback",
+                    device="cpu",
+                    compute_type="int8",
+                    model=options.model_override or "small",
+                    cpu_threads=1,
+                    batch_size=1,
+                    reason="direct ASR call without application profile",
+                ),
+                options,
+                is_cancelled,
+            )
+        elif options.model_override and options.model_override != self._runtime_key[0]:
+            model_name, device, compute_type, cpu_threads = self._runtime_key
+            del model_name
+            self.prepare(
+                HardwareProfile(
+                    name="override",
+                    device=device,  # type: ignore[arg-type]
+                    compute_type=compute_type,
+                    model=options.model_override,
+                    cpu_threads=cpu_threads,
+                    batch_size=1,
+                    reason="direct ASR model override",
+                ),
+                options,
+                is_cancelled,
+            )
+        assert self._runtime_key is not None
+        model_name, device, compute_type, _cpu_threads = self._runtime_key
 
         try:
             segments_iter, info = self._runtime.transcribe(
@@ -203,41 +249,34 @@ class FasterWhisperEngine(ASREngine):
 
     # ------------------------------------------------------------- internals
 
-    def _cuda_available(self) -> bool:
-        try:
-            import ctranslate2  # type: ignore[import-untyped]
-
-            count = ctranslate2.get_cuda_device_count()
-            return bool(count) and int(count) > 0
-        except Exception:
-            return False
-
-    def _default_model(self) -> str:
-        return "small"
-
     def _ensure_model(
         self,
-        model_name: str,
-        *,
-        device: str,
-        compute_type: str,
+        profile: HardwareProfile,
     ) -> None:
+        runtime_key = (
+            profile.model,
+            profile.device,
+            profile.compute_type,
+            profile.cpu_threads,
+        )
         with self._lock:
-            if self._runtime is not None and self._model_name == model_name:
+            if self._runtime is not None and self._runtime_key == runtime_key:
                 return
             try:
                 self._runtime = self._runtime_factory(
-                    model_name,
-                    device=device,
-                    compute_type=compute_type,
+                    profile.model,
+                    device=profile.device,
+                    compute_type=profile.compute_type,
+                    cpu_threads=profile.cpu_threads,
                     download_root=str(self._model_dir),
-                    local_files_only=self._offline,
+                    local_files_only=True,
                 )
             except Exception as exc:
                 raise ModelLoadFailed(
-                    f"failed to load faster-whisper model {model_name!r}: {exc}"
+                    f"failed to load faster-whisper model {profile.model!r}: {exc}"
                 ) from exc
-            self._model_name = model_name
+            self._model_name = profile.model
+            self._runtime_key = runtime_key
 
     def close(self) -> None:
         """Release the underlying runtime. The SDK does not expose a real
@@ -248,3 +287,4 @@ class FasterWhisperEngine(ASREngine):
                 del self._runtime
             self._runtime = None
             self._model_name = None
+            self._runtime_key = None

@@ -24,6 +24,27 @@ def _hf_snapshot_dir(model_dir: Path, model_name: str) -> Path:
     return model_dir / f"models--Systran--faster-whisper-{model_name}"
 
 
+def _is_model_payload(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "config.json").is_file()
+        and (path / "model.bin").is_file()
+    )
+
+
+def _model_payload_dir(model_dir: Path, model_name: str) -> Path | None:
+    flat = model_dir / model_name
+    if _is_model_payload(flat):
+        return flat
+    snapshots = _hf_snapshot_dir(model_dir, model_name) / "snapshots"
+    if not snapshots.is_dir():
+        return None
+    for candidate in sorted(snapshots.iterdir(), reverse=True):
+        if _is_model_payload(candidate):
+            return candidate
+    return None
+
+
 class FilesystemModelCache(ModelCache):
     """Cache that exposes a local directory of pre-downloaded models.
 
@@ -44,12 +65,7 @@ class FilesystemModelCache(ModelCache):
         self._offline = offline
 
     def is_available(self, model: str) -> bool:
-        # We accept either a flat layout (``<model_dir>/<model>``) or the
-        # HuggingFace snapshot layout that faster-whisper uses by default.
-        if (self._model_dir / model).is_dir():
-            return True
-        snap = _hf_snapshot_dir(self._model_dir, model)
-        return snap.is_dir()
+        return _model_payload_dir(self._model_dir, model) is not None
 
     def list_models(self) -> tuple[CachedModel, ...]:
         out: list[CachedModel] = []
@@ -62,22 +78,28 @@ class FilesystemModelCache(ModelCache):
                 model_name = entry.name.removeprefix(
                     "models--Systran--faster-whisper-"
                 )
-                out.append(
-                    CachedModel(
-                        name=model_name, size_bytes=_dir_size(entry), path=entry,
+                payload = _model_payload_dir(self._model_dir, model_name)
+                if payload is not None:
+                    out.append(
+                        CachedModel(
+                            name=model_name,
+                            size_bytes=_dir_size(payload),
+                            path=payload,
+                        )
                     )
-                )
-                seen.add(model_name)
+                    seen.add(model_name)
             elif entry.name not in seen:
                 # A bare ``<model>`` directory (custom layout).
-                out.append(
-                    CachedModel(
-                        name=entry.name,
-                        size_bytes=_dir_size(entry),
-                        path=entry,
+                payload = _model_payload_dir(self._model_dir, entry.name)
+                if payload is not None:
+                    out.append(
+                        CachedModel(
+                            name=entry.name,
+                            size_bytes=_dir_size(payload),
+                            path=payload,
+                        )
                     )
-                )
-                seen.add(entry.name)
+                    seen.add(entry.name)
         return tuple(out)
 
     def download(self, model: str) -> CachedModel:
@@ -91,8 +113,13 @@ class FilesystemModelCache(ModelCache):
             raise RuntimeError("no downloader configured")
         target = self._model_dir / model
         self._downloader(model, target)
+        payload = _model_payload_dir(self._model_dir, model)
+        if payload is None:
+            raise ModelNotAvailable(
+                f"download for model {model!r} did not produce a complete model"
+            )
         return CachedModel(
-            name=model, size_bytes=_dir_size(target), path=target
+            name=model, size_bytes=_dir_size(payload), path=payload
         )
 
 

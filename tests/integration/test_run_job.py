@@ -21,6 +21,7 @@ from lecture_transcriber.domain.enums import ErrorCode, JobStatus
 from lecture_transcriber.domain.errors import AsrFailed, JobLeaseLost, MediaProbeFailed
 from lecture_transcriber.domain.models import (
     HardwareFacts,
+    HardwareProfile,
     Media,
     MediaType,
     TranscriptionOptions,
@@ -72,6 +73,9 @@ class _StaticProbe(MediaProbe):
 
 
 class _BoomEngine(ASREngine):
+    def prepare(self, profile, options, is_cancelled):  # type: ignore[no-untyped-def]
+        return None
+
     def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
         raise AsrFailed("engine boom")
 
@@ -208,6 +212,56 @@ def test_successful_run_writes_four_artifacts_and_completes(stack) -> None:
     assert JobStatus.LOADING_MODEL in statuses
     assert JobStatus.VALIDATING in statuses
     assert JobStatus.EXPORTING in statuses
+
+
+def test_loading_model_stage_prepares_selected_profile(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(media.id, TranscriptionOptions())
+    observed_statuses: list[JobStatus] = []
+    observed_profiles: list[HardwareProfile] = []
+
+    class _PreparingEngine(FakeASREngine):
+        def prepare(self, profile, options, is_cancelled):  # type: ignore[no-untyped-def]
+            current = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+            assert current is not None
+            observed_statuses.append(current.status)
+            observed_profiles.append(profile)
+            return super().prepare(profile, options, is_cancelled)
+
+    _build_run(stack, engine=_PreparingEngine()).run_job(summary.id)
+
+    assert observed_statuses == [JobStatus.LOADING_MODEL]
+    assert observed_profiles[0].model == "medium"
+    assert observed_profiles[0].device == "cpu"
+    assert observed_profiles[0].compute_type == "int8"
+
+
+def test_cancel_requested_during_prepare_skips_transcription(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(media.id, TranscriptionOptions())
+
+    class _CancellingPrepareEngine(FakeASREngine):
+        transcribe_called = False
+
+        def prepare(self, profile, options, is_cancelled):  # type: ignore[no-untyped-def]
+            stack["job_repo"].request_cancel(summary.id)  # type: ignore[attr-defined]
+
+        def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
+            self.transcribe_called = True
+            return super().transcribe(
+                media_path,
+                options,
+                on_segment,
+                is_cancelled,
+            )
+
+    engine = _CancellingPrepareEngine()
+    _build_run(stack, engine=engine).run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.CANCELLED
+    assert engine.transcribe_called is False
 
 
 def test_suspicious_segment_produces_completed_with_warnings(stack) -> None:
@@ -402,6 +456,9 @@ def test_error_message_does_not_leak_absolute_path(stack) -> None:
     summary = create.create(media.id, TranscriptionOptions())
 
     class PathBoomEngine(ASREngine):
+        def prepare(self, profile, options, is_cancelled):  # type: ignore[no-untyped-def]
+            return None
+
         def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
             raise AsrFailed(f"cannot open {media_path}")
 
