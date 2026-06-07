@@ -16,7 +16,7 @@ from lecture_transcriber.application.services.export_transcript import (
 from lecture_transcriber.application.services.get_job import GetJobService
 from lecture_transcriber.application.services.run_job import RunJobService
 from lecture_transcriber.domain.enums import ErrorCode, JobStatus
-from lecture_transcriber.domain.errors import AsrFailed
+from lecture_transcriber.domain.errors import AsrFailed, JobLeaseLost
 from lecture_transcriber.domain.models import (
     HardwareFacts,
     Media,
@@ -250,6 +250,27 @@ def test_cancellation_before_export_marks_job_cancelled(stack) -> None:
     assert job.status == JobStatus.CANCELLED
     artifacts = stack["artifact_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
     assert artifacts == ()
+
+
+def test_run_job_rejects_foreign_lease_owner(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(media.id, TranscriptionOptions())
+    claimed = stack["job_repo"].claim(  # type: ignore[attr-defined]
+        summary.id,
+        worker_id="owner",
+        lease_seconds=120,
+    )
+    assert claimed is not None
+
+    run = _build_run(stack, engine=FakeASREngine())
+
+    with pytest.raises(JobLeaseLost):
+        run.run_job(summary.id, worker_id="intruder")
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.PROBING
+    assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
 
 
 def test_get_service_returns_detail_with_artifacts(stack) -> None:

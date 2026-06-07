@@ -5,11 +5,12 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import update
 
 from lecture_transcriber.application.services.create_job import CreateJobService
 from lecture_transcriber.application.services.export_transcript import (
@@ -30,6 +31,7 @@ from lecture_transcriber.infrastructure.database import (
     initialize_database,
 )
 from lecture_transcriber.infrastructure.file_store import LocalFileStore
+from lecture_transcriber.infrastructure.orm import JobRecord
 from lecture_transcriber.infrastructure.repositories import (
     SessionFactory,
     SqlArtifactRepository,
@@ -157,7 +159,17 @@ def test_expired_lease_is_recovered_and_job_re_runs(stack) -> None:
         summary.id, JobStatus.TRANSCRIBING, 50, "halfway"
     )
     # Manually expire the lease.
-    job_repo.extend_lease(summary.id, "dead-worker", lease_seconds=-3600)  # type: ignore[attr-defined]
+    with job_repo._session_factory() as session:  # type: ignore[attr-defined]
+        session.execute(
+            update(JobRecord)
+            .where(JobRecord.id == str(summary.id))
+            .values(
+                lease_expires_at=(
+                    datetime.now(UTC) - timedelta(seconds=10)
+                ).replace(tzinfo=None)
+            )
+        )
+        session.commit()
 
     # Start a fresh worker. It must (1) append a recovered_after_restart event,
     # (2) claim the job, (3) complete it.
@@ -190,8 +202,15 @@ def test_lease_holder_can_extend(stack) -> None:
     job_repo.claim_next(worker_id="alive", lease_seconds=60)  # type: ignore[attr-defined]
     assert job_repo.extend_lease(summary.id, "alive", lease_seconds=120) is True  # type: ignore[attr-defined]
     assert job_repo.extend_lease(summary.id, "stranger", lease_seconds=120) is False  # type: ignore[attr-defined]
-    # Move time forward and verify recover_expired_leases resets the state.
-    job_repo.extend_lease(summary.id, "alive", lease_seconds=-3600)  # type: ignore[attr-defined]
+    assert job_repo.extend_lease(summary.id, "alive", lease_seconds=0) is False  # type: ignore[attr-defined]
+    # Expire the lease at the persistence boundary and verify recovery.
+    with job_repo._session_factory() as session:  # type: ignore[attr-defined]
+        session.execute(
+            update(JobRecord)
+            .where(JobRecord.id == str(summary.id))
+            .values(lease_expires_at=datetime.now(UTC).replace(tzinfo=None))
+        )
+        session.commit()
     recovered = job_repo.recover_expired_leases()  # type: ignore[attr-defined]
     assert recovered == 1
     after = job_repo.get(summary.id)
@@ -200,3 +219,60 @@ def test_lease_holder_can_extend(stack) -> None:
     # The recovery event was appended.
     events = stack["event_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
     assert any(e.message == "recovered_after_restart" for e in events)
+
+
+def test_recovery_resets_progress_for_clean_retry(stack) -> None:
+    media: Media = stack["media"]
+    summary = _create(stack).create(media.id, TranscriptionOptions())
+    job_repo = stack["job_repo"]  # type: ignore[assignment]
+    job_repo.claim_next(worker_id="dead", lease_seconds=60)  # type: ignore[attr-defined]
+    job_repo.save_progress(  # type: ignore[attr-defined]
+        summary.id, JobStatus.LOADING_MODEL, 20, "loading"
+    )
+    job_repo.save_progress(  # type: ignore[attr-defined]
+        summary.id, JobStatus.TRANSCRIBING, 70, "almost done"
+    )
+    with job_repo._session_factory() as session:  # type: ignore[attr-defined]
+        session.execute(
+            update(JobRecord)
+            .where(JobRecord.id == str(summary.id))
+            .values(lease_expires_at=datetime.now(UTC).replace(tzinfo=None))
+        )
+        session.commit()
+
+    assert job_repo.recover_expired_leases() == 1  # type: ignore[attr-defined]
+
+    recovered = job_repo.get(summary.id)
+    assert recovered is not None
+    assert recovered.status == JobStatus.QUEUED
+    assert recovered.progress == 0
+    assert recovered.started_at is None
+    assert recovered.worker_id is None
+    assert recovered.lease_expires_at is None
+
+
+def test_recovery_finishes_cancel_requested_job(stack) -> None:
+    media: Media = stack["media"]
+    summary = _create(stack).create(media.id, TranscriptionOptions())
+    job_repo = stack["job_repo"]  # type: ignore[assignment]
+    job_repo.claim_next(worker_id="dead", lease_seconds=60)  # type: ignore[attr-defined]
+    assert job_repo.request_cancel(summary.id) is True  # type: ignore[attr-defined]
+    with job_repo._session_factory() as session:  # type: ignore[attr-defined]
+        session.execute(
+            update(JobRecord)
+            .where(JobRecord.id == str(summary.id))
+            .values(lease_expires_at=datetime.now(UTC).replace(tzinfo=None))
+        )
+        session.commit()
+
+    assert job_repo.recover_expired_leases() == 1  # type: ignore[attr-defined]
+
+    recovered = job_repo.get(summary.id)
+    assert recovered is not None
+    assert recovered.status == JobStatus.CANCELLED
+    assert recovered.cancel_requested is True
+    assert recovered.worker_id is None
+    assert recovered.lease_expires_at is None
+    events = stack["event_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
+    assert events[-1].status == JobStatus.CANCELLED
+    assert events[-1].message == "cancelled_during_recovery"

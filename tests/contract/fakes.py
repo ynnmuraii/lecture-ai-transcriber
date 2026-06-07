@@ -197,6 +197,9 @@ class InMemoryJobRepository(JobRepository):
         if not job.is_terminal():
             job.transition_to(status, message=message)
         job.update_progress(progress, message=message)
+        if job.is_terminal():
+            job.worker_id = None
+            job.lease_expires_at = None
 
     def save_progress_with_event(
         self,
@@ -220,6 +223,8 @@ class InMemoryJobRepository(JobRepository):
         if not job or job.is_terminal():
             return
         job.mark_failed(error_code, error_message)
+        job.worker_id = None
+        job.lease_expires_at = None
 
     def request_cancel(self, job_id: UUID) -> bool:
         job = self._jobs.get(job_id)
@@ -232,9 +237,26 @@ class InMemoryJobRepository(JobRepository):
         job = self._jobs.get(job_id)
         return bool(job and job.cancel_requested)
 
+    def owns_active_lease(self, job_id: UUID, worker_id: str) -> bool:
+        job = self._jobs.get(job_id)
+        return bool(
+            job
+            and not job.is_terminal()
+            and job.worker_id == worker_id
+            and job.lease_expires_at is not None
+            and job.lease_expires_at > datetime.now(UTC)
+        )
+
     def extend_lease(self, job_id: UUID, worker_id: str, lease_seconds: int) -> bool:
         job = self._jobs.get(job_id)
-        if not job or job.worker_id != worker_id or job.is_terminal():
+        if (
+            lease_seconds <= 0
+            or not job
+            or job.worker_id != worker_id
+            or job.is_terminal()
+            or job.lease_expires_at is None
+            or job.lease_expires_at <= datetime.now(UTC)
+        ):
             return False
         from datetime import timedelta
 
@@ -252,11 +274,24 @@ class InMemoryJobRepository(JobRepository):
                 and job.lease_expires_at < now
                 and not job.is_terminal()
             ):
-                job.worker_id = None
-                job.lease_expires_at = None
-                job.cancel_requested = False
-                if job.status != JobStatus.QUEUED:
+                if job.cancel_requested:
+                    job.transition_to(
+                        JobStatus.CANCELLED,
+                        message="cancelled_during_recovery",
+                    )
+                    job.worker_id = None
+                    job.lease_expires_at = None
+                else:
+                    job.worker_id = None
+                    job.lease_expires_at = None
+                    job.cancel_requested = False
                     job.status = JobStatus.QUEUED
+                    job.progress = 0
+                    job.stage_message = "recovered_after_restart"
+                    job.started_at = None
+                    job.completed_at = None
+                    job.error_code = None
+                    job.error_message = None
                 recovered += 1
         return recovered
 

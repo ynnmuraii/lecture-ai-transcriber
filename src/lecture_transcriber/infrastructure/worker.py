@@ -13,20 +13,23 @@ which is invoked at startup before the loop begins.
 
 from __future__ import annotations
 
+import logging
+import os
 import socket
 import threading
 import uuid
-from datetime import UTC, datetime
+from uuid import UUID
 
 from lecture_transcriber.application.services.run_job import RunJobService
 from lecture_transcriber.domain.errors import JobLeaseLost
 from lecture_transcriber.domain.ports import JobRepository
 
+logger = logging.getLogger(__name__)
+
 
 def _make_worker_id() -> str:
     host = socket.gethostname() or "unknown"
-    pid = uuid.getpid() if hasattr(uuid, "getpid") else 0
-    return f"{host}:{pid}:{uuid.uuid4().hex[:8]}"
+    return f"{host}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 
 class LocalWorker:
@@ -39,22 +42,30 @@ class LocalWorker:
         runner: RunJobService,
         poll_interval_seconds: float = 1.0,
         lease_seconds: int = 120,
-        heartbeat_interval_seconds: int = 30,
+        heartbeat_interval_seconds: float = 30,
     ) -> None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat_interval_seconds must be positive")
         self._job_repo = job_repo
         self._runner = runner
         self._poll_interval = max(0.0, poll_interval_seconds)
         self._lease_seconds = lease_seconds
-        self._heartbeat_interval = max(1, heartbeat_interval_seconds)
+        self._heartbeat_interval = heartbeat_interval_seconds
         self._worker_id = _make_worker_id()
         self._stop_event = threading.Event()
-        self._last_heartbeat: datetime | None = None
+        self._last_error: str | None = None
 
     # ------------------------------------------------------------------ API
 
     @property
     def worker_id(self) -> str:
         return self._worker_id
+
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
 
     def stop(self) -> None:
         """Signal the loop to exit at the next control point."""
@@ -69,13 +80,30 @@ class LocalWorker:
         )
         if job is None:
             return False
-        self._last_heartbeat = datetime.now(UTC)
+        self._last_error = None
+        finished = threading.Event()
+        lease_lost = threading.Event()
+        heartbeat = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(job.id, finished, lease_lost),
+            name=f"lease-heartbeat-{job.id}",
+            daemon=True,
+        )
+        heartbeat.start()
         try:
-            self._runner.run_job(job.id)
+            self._runner.run_job(
+                job.id,
+                worker_id=self._worker_id,
+                lease_lost=lease_lost.is_set,
+            )
         except JobLeaseLost:
-            # Lost ownership mid-run. Don't republish artifacts; rely on the
-            # restart-recovery path to re-queue the job.
-            return True
+            logger.warning("Worker %s lost lease for job %s", self._worker_id, job.id)
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.exception("Worker %s failed while running job %s", self._worker_id, job.id)
+        finally:
+            finished.set()
+            heartbeat.join(timeout=self._heartbeat_interval + 1)
         return True
 
     def run_forever(self) -> None:
@@ -100,24 +128,20 @@ class LocalWorker:
 
     # ------------------------------------------------------------- internals
 
-    def heartbeat_if_needed(self) -> None:
-        """Extend the lease on the currently-claimed job, if any.
-
-        The runner is responsible for actually calling this between segments
-        (the engine's ``on_segment`` callback is the right place). It is a
-        no-op if no job is currently claimed.
-        """
-        now = datetime.now(UTC)
-        if (
-            self._last_heartbeat is not None
-            and (now - self._last_heartbeat).total_seconds() < self._heartbeat_interval
-        ):
-            return
-        # The runner does not tell us which job is current; the queue's
-        # ``extend_lease`` API takes a job_id we don't track. Workers that
-        # need active lease renewal should re-architect: for the MVP we just
-        # touch the timestamp so the next pass recomputes.
-        self._last_heartbeat = now
+    def _heartbeat_loop(
+        self,
+        job_id: UUID,
+        finished: threading.Event,
+        lease_lost: threading.Event,
+    ) -> None:
+        while not finished.wait(self._heartbeat_interval):
+            if not self._job_repo.extend_lease(
+                job_id,
+                self._worker_id,
+                self._lease_seconds,
+            ):
+                lease_lost.set()
+                return
 
 
 __all__ = ["LocalWorker"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -123,7 +124,11 @@ def _create(stack: dict[str, object]) -> CreateJobService:
 
 
 def _build_worker(
-    stack: dict[str, object], *, engine: ASREngine
+    stack: dict[str, object],
+    *,
+    engine: ASREngine,
+    lease_seconds: int = 120,
+    heartbeat_interval_seconds: float = 30,
 ) -> LocalWorker:
     runner = RunJobService(
         job_repo=stack["job_repo"],  # type: ignore[arg-type]
@@ -140,6 +145,8 @@ def _build_worker(
         job_repo=stack["job_repo"],  # type: ignore[arg-type]
         runner=runner,
         poll_interval_seconds=0.01,
+        lease_seconds=lease_seconds,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
     )
 
 
@@ -147,6 +154,67 @@ def test_worker_id_is_unique_per_instance(stack) -> None:
     w1 = _build_worker(stack, engine=FakeASREngine())
     w2 = _build_worker(stack, engine=FakeASREngine())
     assert w1.worker_id != w2.worker_id
+
+
+def test_worker_id_contains_real_process_id(stack) -> None:
+    worker = _build_worker(stack, engine=FakeASREngine())
+
+    assert f":{os.getpid()}:" in worker.worker_id
+
+
+def test_worker_renews_lease_while_engine_is_busy(stack) -> None:
+    media: Media = stack["media"]
+    _create(stack).create(media.id, TranscriptionOptions())
+    job_repo = stack["job_repo"]
+    extensions: list[tuple[object, str, int]] = []
+    original_extend = job_repo.extend_lease  # type: ignore[attr-defined]
+
+    def recording_extend(job_id, worker_id, lease_seconds):  # type: ignore[no-untyped-def]
+        extensions.append((job_id, worker_id, lease_seconds))
+        return original_extend(job_id, worker_id, lease_seconds)
+
+    job_repo.extend_lease = recording_extend  # type: ignore[attr-defined]
+
+    class _SlowEngine(FakeASREngine):
+        def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
+            time.sleep(0.08)
+            return super().transcribe(media_path, options, on_segment, is_cancelled)
+
+    worker = _build_worker(
+        stack,
+        engine=_SlowEngine(),
+        lease_seconds=1,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    assert worker.run_once() is True
+    assert extensions
+    assert all(worker_id == worker.worker_id for _, worker_id, _ in extensions)
+
+
+def test_worker_stops_pipeline_when_lease_extension_fails(stack) -> None:
+    media: Media = stack["media"]
+    summary = _create(stack).create(media.id, TranscriptionOptions())
+    job_repo = stack["job_repo"]
+    job_repo.extend_lease = lambda *args, **kwargs: False  # type: ignore[attr-defined]
+
+    class _SlowEngine(FakeASREngine):
+        def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
+            time.sleep(0.05)
+            return super().transcribe(media_path, options, on_segment, is_cancelled)
+
+    worker = _build_worker(
+        stack,
+        engine=_SlowEngine(),
+        lease_seconds=1,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    assert worker.run_once() is True
+    job = job_repo.get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert not job.is_terminal()
+    assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
 
 
 def test_run_once_processes_queued_job(stack) -> None:
@@ -217,3 +285,29 @@ def test_one_failed_job_does_not_kill_the_loop(stack) -> None:
     assert worker.run_once() is True
     good_after = stack["job_repo"].get(good_summary.id)  # type: ignore[attr-defined]
     assert good_after is not None and good_after.status == JobStatus.COMPLETED
+
+
+def test_unexpected_runner_error_does_not_stop_processing(stack) -> None:
+    media: Media = stack["media"]
+    first = _create(stack).create(media.id, TranscriptionOptions())
+    second = _create(stack).create(media.id, TranscriptionOptions())
+    worker = _build_worker(stack, engine=FakeASREngine())
+    original_run_job = worker._runner.run_job
+    calls = 0
+
+    def fail_once(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("unexpected runner failure")
+        return original_run_job(*args, **kwargs)
+
+    worker._runner.run_job = fail_once  # type: ignore[method-assign]
+
+    assert worker.run_once() is True
+    assert worker.last_error == "unexpected runner failure"
+    assert worker.run_once() is True
+    completed = stack["job_repo"].get(second.id)  # type: ignore[attr-defined]
+    assert completed is not None and completed.status == JobStatus.COMPLETED
+    abandoned = stack["job_repo"].get(first.id)  # type: ignore[attr-defined]
+    assert abandoned is not None and abandoned.status == JobStatus.PROBING

@@ -18,7 +18,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from lecture_transcriber.domain.enums import JobStatus, MediaType
+from lecture_transcriber.domain.enums import ErrorCode, JobStatus, MediaType
 from lecture_transcriber.domain.models import (
     Artifact,
     HardwareProfile,
@@ -224,6 +224,7 @@ class SqlJobRepository(JobRepository):
             if job.is_terminal():
                 return
             job.mark_failed(error_code, error_message)
+            _release_terminal_lease(job)
             _copy_job_to_record(job, record)
             session.commit()
 
@@ -243,10 +244,30 @@ class SqlJobRepository(JobRepository):
             record = session.get(JobRecord, str(job_id))
             return bool(record and record.cancel_requested)
 
+    def owns_active_lease(self, job_id: UUID, worker_id: str) -> bool:
+        with self._session_factory() as session:
+            record = session.get(JobRecord, str(job_id))
+            if (
+                record is None
+                or record.worker_id != worker_id
+                or record.lease_expires_at is None
+                or _is_terminal(JobStatus(record.status))
+            ):
+                return False
+            return _as_utc(record.lease_expires_at) > _utcnow()
+
     def extend_lease(self, job_id: UUID, worker_id: str, lease_seconds: int) -> bool:
+        if lease_seconds <= 0:
+            return False
         with self._session_factory() as session:
             record = session.get(JobRecord, str(job_id), with_for_update=True)
-            if record is None or record.worker_id != worker_id:
+            if (
+                record is None
+                or record.worker_id != worker_id
+                or record.lease_expires_at is None
+                or _as_utc(record.lease_expires_at) <= _utcnow()
+                or _is_terminal(JobStatus(record.status))
+            ):
                 return False
             record.lease_expires_at = _utcnow() + timedelta(seconds=lease_seconds)
             session.commit()
@@ -298,25 +319,41 @@ class SqlJobRepository(JobRepository):
                 JobRecord.lease_expires_at < now,
             )
             for record in session.scalars(stmt):
-                if record.status in {
-                    JobStatus.COMPLETED.value,
-                    JobStatus.FAILED.value,
-                    JobStatus.CANCELLED.value,
-                    JobStatus.COMPLETED_WITH_WARNINGS.value,
-                }:
+                job = _job_from_record(record)
+                if job.is_terminal():
                     continue
-                record.worker_id = None
-                record.lease_expires_at = None
-                record.cancel_requested = False
-                record.status = JobStatus.QUEUED.value
+                if job.cancel_requested:
+                    job.transition_to(
+                        JobStatus.CANCELLED,
+                        message="cancelled_during_recovery",
+                    )
+                    _release_terminal_lease(job)
+                    _copy_job_to_record(job, record)
+                    event_status = JobStatus.CANCELLED
+                    event_message = "cancelled_during_recovery"
+                    error_code = ErrorCode.CANCELLED.value
+                else:
+                    record.worker_id = None
+                    record.lease_expires_at = None
+                    record.cancel_requested = False
+                    record.status = JobStatus.QUEUED.value
+                    record.progress = 0
+                    record.stage_message = "recovered_after_restart"
+                    record.started_at = None
+                    record.completed_at = None
+                    record.error_code = None
+                    record.error_message = None
+                    event_status = JobStatus.QUEUED
+                    event_message = "recovered_after_restart"
+                    error_code = None
                 session.add(
                     JobEventRecord(
                         id=str(uuid4()),
                         job_id=record.id,
                         occurred_at=_utcnow(),
-                        status=JobStatus.QUEUED.value,
-                        message="recovered_after_restart",
-                        error_code=None,
+                        status=event_status.value,
+                        message=event_message,
+                        error_code=error_code,
                     )
                 )
                 recovered += 1
@@ -368,6 +405,13 @@ def _apply_progress(
     if status != job.status:
         job.transition_to(status, message=message)
     job.update_progress(max(job.progress, progress), message=message)
+    _release_terminal_lease(job)
+
+
+def _release_terminal_lease(job: TranscriptionJob) -> None:
+    if job.is_terminal():
+        job.worker_id = None
+        job.lease_expires_at = None
 
 
 def _claim_record(

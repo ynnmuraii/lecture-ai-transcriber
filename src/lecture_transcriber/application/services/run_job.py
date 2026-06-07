@@ -12,6 +12,7 @@ and refuses to publish any artifacts if the user asked to cancel.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -24,6 +25,7 @@ from lecture_transcriber.domain.errors import (
     AsrFailed,
     ExportFailed,
     JobCancelled,
+    JobLeaseLost,
     ModelLoadFailed,
 )
 from lecture_transcriber.domain.models import (
@@ -103,29 +105,43 @@ class RunJobService:
         job = self._job_repo.claim_next(worker_id="local", lease_seconds=120)
         if job is None:
             return False
-        self._execute(job.id)
+        self.run_job(job.id, worker_id="local")
         return True
 
-    def run_job(self, job_id: UUID) -> None:
+    def run_job(
+        self,
+        job_id: UUID,
+        *,
+        worker_id: str | None = None,
+        lease_lost: Callable[[], bool] | None = None,
+    ) -> None:
         """Execute a specific (already-claimed) job. Used by tests and by
         the CLI ``--wait`` path that wants to drive a single job deterministically.
         """
         job = self._job_repo.get(job_id)
         if job is None or job.is_terminal():
             return
+        owner = worker_id or f"inline:{uuid4().hex}"
         if job.status == JobStatus.QUEUED:
             claimed = self._job_repo.claim(
                 job_id,
-                worker_id="local",
+                worker_id=owner,
                 lease_seconds=120,
             )
             if claimed is None:
-                return
-        self._execute(job_id)
+                raise JobLeaseLost(f"job {job_id} could not be claimed")
+        if not self._job_repo.owns_active_lease(job_id, owner):
+            raise JobLeaseLost(f"worker {owner} does not own job {job_id}")
+        self._execute(job_id, owner, lease_lost or (lambda: False))
 
     # --------------------------------------------------------------- pipeline
 
-    def _execute(self, job_id: UUID) -> None:
+    def _execute(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        lease_lost: Callable[[], bool],
+    ) -> None:
         job = self._job_repo.get(job_id)
         if job is None:
             return
@@ -139,11 +155,21 @@ class RunJobService:
             return
 
         try:
-            self._step_loading_model(job_id, media)
+            self._step_loading_model(job_id, media, worker_id, lease_lost)
             segments, result_engine, result_language, vad_dur = self._step_transcribing(
-                job_id, media, job
+                job_id,
+                media,
+                job,
+                worker_id,
+                lease_lost,
             )
-            warnings = self._step_validating(job_id, media, segments)
+            warnings = self._step_validating(
+                job_id,
+                media,
+                segments,
+                worker_id,
+                lease_lost,
+            )
             transcript = Transcript(
                 schema_version="1.0",
                 job_id=job_id,
@@ -155,7 +181,9 @@ class RunJobService:
                 source_duration_seconds=media.duration_seconds,
                 vad_duration_seconds=vad_dur,
             )
-            self._step_exporting(job_id, transcript)
+            self._step_exporting(job_id, transcript, worker_id, lease_lost)
+        except JobLeaseLost:
+            raise
         except JobCancelled:
             self._on_cancelled(job_id)
         except ExportFailed as exc:
@@ -169,10 +197,16 @@ class RunJobService:
 
     # ----------------------------------------------------------------- steps
 
-    def _step_loading_model(self, job_id: UUID, media: Media) -> None:
+    def _step_loading_model(
+        self,
+        job_id: UUID,
+        media: Media,
+        worker_id: str,
+        lease_lost: Callable[[], bool],
+    ) -> None:
         # Probing is implicit: re-probe to make sure we can still open the
         # file at execution time (e.g. a removed file should fail loudly).
-        self._raise_if_cancelled(job_id)
+        self._raise_if_stopped(job_id, worker_id, lease_lost)
         path = self._file_store.resolve_media(media.stored_path)
         try:
             result = self._probe.probe(path)
@@ -186,7 +220,7 @@ class RunJobService:
             progress=20,
             message="preparing model",
         )
-        self._raise_if_cancelled(job_id)
+        self._raise_if_stopped(job_id, worker_id, lease_lost)
         self._advance(
             job_id,
             JobStatus.TRANSCRIBING,
@@ -199,19 +233,22 @@ class RunJobService:
         job_id: UUID,
         media: Media,
         job: Any,
+        worker_id: str,
+        lease_lost: Callable[[], bool],
     ) -> tuple[
         tuple[TranscriptSegment, ...],
         EngineMetadata,
         Any,
         float | None,
     ]:
-        self._raise_if_cancelled(job_id)
+        self._raise_if_stopped(job_id, worker_id, lease_lost)
         path = self._file_store.resolve_media(media.stored_path)
         total = max(0.001, media.duration_seconds)
         last_progress = self._last_progress(job_id)
 
         def on_segment(seg: TranscriptSegment) -> None:
             nonlocal last_progress
+            self._raise_if_stopped(job_id, worker_id, lease_lost)
             new = 30 + _ratio(seg.end, total) * 60 // 100  # 30..90
             if new <= last_progress:
                 return
@@ -219,15 +256,19 @@ class RunJobService:
             self._job_repo.save_progress(
                 job_id, JobStatus.TRANSCRIBING, new, None
             )
-            self._raise_if_cancelled(job_id)
+            self._raise_if_stopped(job_id, worker_id, lease_lost)
 
         result = self._engine.transcribe(
             path,
             job.options,
             on_segment=on_segment,
-            is_cancelled=lambda: self._job_repo.is_cancel_requested(job_id),
+            is_cancelled=lambda: (
+                self._job_repo.is_cancel_requested(job_id)
+                or lease_lost()
+                or not self._job_repo.owns_active_lease(job_id, worker_id)
+            ),
         )
-        self._raise_if_cancelled(job_id)
+        self._raise_if_stopped(job_id, worker_id, lease_lost)
         return (
             result.segments,
             result.engine,
@@ -240,6 +281,8 @@ class RunJobService:
         job_id: UUID,
         media: Media,
         segments: tuple[TranscriptSegment, ...],
+        worker_id: str,
+        lease_lost: Callable[[], bool],
     ) -> tuple[TranscriptWarning, ...]:
         self._advance(
             job_id,
@@ -248,13 +291,15 @@ class RunJobService:
             message="validating",
         )
         result = validate_transcript(segments, media_duration=media.duration_seconds)
-        self._raise_if_cancelled(job_id)
+        self._raise_if_stopped(job_id, worker_id, lease_lost)
         return result.warnings
 
     def _step_exporting(
         self,
         job_id: UUID,
         transcript: Transcript,
+        worker_id: str,
+        lease_lost: Callable[[], bool],
     ) -> None:
         self._advance(
             job_id,
@@ -267,8 +312,9 @@ class RunJobService:
         formats: tuple[str, ...] = ("json", "txt", "srt", "vtt")
         stored: list[StoredArtifact] = []
         for fmt in formats:
-            self._raise_if_cancelled(job_id)
+            self._raise_if_stopped(job_id, worker_id, lease_lost)
             stored.append(self._exporter.export(job_id, fmt, transcript))
+        self._raise_if_stopped(job_id, worker_id, lease_lost)
         for s in stored:
             self._artifact_repo.add(s.artifact)
         # Decide terminal status.
@@ -315,7 +361,14 @@ class RunJobService:
             )
         )
 
-    def _raise_if_cancelled(self, job_id: UUID) -> None:
+    def _raise_if_stopped(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        lease_lost: Callable[[], bool],
+    ) -> None:
+        if lease_lost() or not self._job_repo.owns_active_lease(job_id, worker_id):
+            raise JobLeaseLost(f"worker {worker_id} lost lease for job {job_id}")
         if self._job_repo.is_cancel_requested(job_id):
             raise JobCancelled(f"job {job_id} cancelled by user")
 
