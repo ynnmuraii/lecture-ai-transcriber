@@ -38,7 +38,6 @@ from lecture_transcriber.domain.models import (
     Transcript,
     TranscriptionJob,
     TranscriptSegment,
-    TranscriptWarning,
 )
 from lecture_transcriber.domain.ports import (
     ArtifactRepository,
@@ -52,6 +51,7 @@ from lecture_transcriber.domain.ports import (
     StoredArtifact,
 )
 from lecture_transcriber.transcription.validator import (
+    ValidationResult,
     validate_transcript,
 )
 
@@ -167,10 +167,11 @@ class RunJobService:
                 worker_id,
                 lease_lost,
             )
-            warnings = self._step_validating(
+            validated = self._step_validating(
                 job_id,
                 media,
                 segments,
+                result_language,
                 worker_id,
                 lease_lost,
             )
@@ -180,8 +181,8 @@ class RunJobService:
                 media=media,
                 engine=result_engine,
                 language=result_language,
-                segments=segments,
-                warnings=warnings,
+                segments=validated.segments,
+                warnings=validated.warnings,
                 source_duration_seconds=media.duration_seconds,
                 vad_duration_seconds=vad_dur,
             )
@@ -278,6 +279,10 @@ class RunJobService:
             ),
         )
         self._raise_if_stopped(job_id, worker_id, lease_lost)
+        if not result.segments or not any(
+            segment.text.strip() for segment in result.segments
+        ):
+            raise AsrFailed("transcription produced no text")
         return (
             result.segments,
             result.engine,
@@ -290,18 +295,24 @@ class RunJobService:
         job_id: UUID,
         media: Media,
         segments: tuple[TranscriptSegment, ...],
+        language: LanguageMetadata,
         worker_id: str,
         lease_lost: Callable[[], bool],
-    ) -> tuple[TranscriptWarning, ...]:
+    ) -> ValidationResult:
         self._advance(
             job_id,
             JobStatus.VALIDATING,
             progress=92,
             message="validating",
         )
-        result = validate_transcript(segments, media_duration=media.duration_seconds)
+        result = validate_transcript(
+            segments,
+            media_duration=media.duration_seconds,
+            requested_language=language.requested,
+            detected_language=language.detected,
+        )
         self._raise_if_stopped(job_id, worker_id, lease_lost)
-        return result.warnings
+        return result
 
     def _step_exporting(
         self,

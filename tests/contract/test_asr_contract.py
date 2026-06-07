@@ -23,7 +23,7 @@ def test_asr_contract_emits_verbatim_text(tmp_path: Path) -> None:
         is_cancelled=lambda: False,
     )
 
-    assert [s.text for s in seen] == ["эм, начали", "  пробелы по краям  "]
+    assert [s.text for s in seen] == ["эм, начали", "пробелы по краям"]
     assert result.segments == tuple(seen)
 
 

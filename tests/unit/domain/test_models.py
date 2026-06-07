@@ -299,6 +299,44 @@ def test_canonical_json_preserves_verbatim_text() -> None:
     assert data["segments"][0]["text"] == "  спасибо за просмотр  "
 
 
+def test_transcript_rejects_duplicate_or_out_of_order_segment_indexes() -> None:
+    media = _media()
+    common = dict(
+        schema_version="1.0",
+        job_id=uuid4(),
+        media=media,
+        engine=EngineMetadata(
+            name="faster-whisper",
+            version="1.2.0",
+            model="small",
+            device="cpu",
+            compute_type="int8",
+        ),
+        language=LanguageMetadata(requested=None, detected="ru", probability=0.9),
+        warnings=(),
+        source_duration_seconds=2.0,
+        vad_duration_seconds=None,
+    )
+
+    with pytest.raises(ValueError, match="indexes"):
+        Transcript(
+            **common,
+            segments=(
+                TranscriptSegment(index=0, start=0.0, end=1.0, text="a"),
+                TranscriptSegment(index=0, start=1.0, end=2.0, text="b"),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="chronological"):
+        Transcript(
+            **common,
+            segments=(
+                TranscriptSegment(index=0, start=1.0, end=2.0, text="a"),
+                TranscriptSegment(index=1, start=0.0, end=1.0, text="b"),
+            ),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Port re-exports
 # ---------------------------------------------------------------------------

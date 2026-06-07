@@ -154,26 +154,32 @@ class FasterWhisperEngine(ASREngine):
             raise AsrFailed(f"faster-whisper failed: {exc}") from exc
 
         emitted: list[TranscriptSegment] = []
-        try:
-            for index, sdk_segment in enumerate(segments_iter):
-                if is_cancelled():
-                    raise JobCancelled("cancelled by user")
+        iterator = iter(segments_iter)
+        index = 0
+        while True:
+            try:
+                sdk_segment = next(iterator)
+            except StopIteration:
+                break
+            except Exception as exc:  # pragma: no cover - SDK generator failure
+                raise AsrFailed(f"faster-whisper failed mid-stream: {exc}") from exc
+            if is_cancelled():
+                raise JobCancelled("cancelled by user")
+            try:
                 domain_segment = _to_domain_segment(sdk_segment, index=index)
-                emitted.append(domain_segment)
-                on_segment(domain_segment)
-        except JobCancelled:
-            raise
-        except Exception as exc:  # pragma: no cover - mapped to domain error
-            raise AsrFailed(f"faster-whisper failed mid-stream: {exc}") from exc
+            except (TypeError, ValueError) as exc:
+                raise AsrFailed(f"invalid faster-whisper segment: {exc}") from exc
+            emitted.append(domain_segment)
+            on_segment(domain_segment)
+            index += 1
 
         detected_language = getattr(info, "language", None)
         detected_probability = getattr(info, "language_probability", None)
         source_duration = float(getattr(info, "duration", 0.0)) or 0.0
         vad_duration: float | None = None
-        # The SDK does not always expose this; keep the field optional.
-        segments_after_vad = getattr(info, "segments_after_vad", None)
-        if isinstance(segments_after_vad, (int, float)):
-            vad_duration = float(segments_after_vad)
+        duration_after_vad = getattr(info, "duration_after_vad", None)
+        if isinstance(duration_after_vad, (int, float)):
+            vad_duration = float(duration_after_vad)
 
         return ASRResult(
             engine=EngineMetadata(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
@@ -62,9 +63,16 @@ class FakeASREngine(ASREngine):
         source_duration: float = 10.0,
         vad_duration: float | None = 9.5,
     ) -> None:
-        self._segments = segments or (
-            TranscriptSegment(index=0, start=0.0, end=2.0, text="Добрый день."),
-            TranscriptSegment(index=1, start=2.0, end=4.5, text="  эм, пример  "),
+        source_segments = (
+            segments
+            if segments is not None
+            else (
+                TranscriptSegment(index=0, start=0.0, end=2.0, text="Добрый день."),
+                TranscriptSegment(index=1, start=2.0, end=4.5, text="  эм, пример  "),
+            )
+        )
+        self._segments = tuple(
+            replace(segment, text=segment.text.strip()) for segment in source_segments
         )
         self._language = detected_language
         self._language_probability = detected_probability

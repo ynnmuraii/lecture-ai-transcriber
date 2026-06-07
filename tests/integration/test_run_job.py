@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -227,6 +228,64 @@ def test_suspicious_segment_produces_completed_with_warnings(stack) -> None:
     job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
     assert job is not None
     assert job.status == JobStatus.COMPLETED_WITH_WARNINGS
+    artifact = next(
+        item
+        for item in stack["artifact_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
+        if item.format == "json"
+    )
+    payload = json.loads(
+        stack["file_store"]  # type: ignore[attr-defined]
+        .resolve_artifact(artifact.relative_path)
+        .read_text(encoding="utf-8")
+    )
+    assert payload["segments"][0]["needs_review"] is True
+    assert "LOW_AVG_LOGPROB" in payload["segments"][0]["review_reasons"]
+
+
+def test_language_mismatch_is_exported_as_warning(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(
+        media.id,
+        TranscriptionOptions(language="ru"),
+    )
+    run = _build_run(
+        stack,
+        engine=FakeASREngine(detected_language="en"),
+    )
+
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED_WITH_WARNINGS
+    artifact = next(
+        item
+        for item in stack["artifact_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
+        if item.format == "json"
+    )
+    payload = json.loads(
+        stack["file_store"]  # type: ignore[attr-defined]
+        .resolve_artifact(artifact.relative_path)
+        .read_text(encoding="utf-8")
+    )
+    assert any(
+        warning["code"] == "LANGUAGE_MISMATCH"
+        for warning in payload["warnings"]
+    )
+
+
+def test_empty_transcription_fails_without_artifacts(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(media.id, TranscriptionOptions())
+    run = _build_run(stack, engine=FakeASREngine(segments=()))
+
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == ErrorCode.ASR_FAILED.value
+    assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
 
 
 def test_asr_failure_records_stable_error_code(stack) -> None:

@@ -19,6 +19,7 @@ import pytest
 from lecture_transcriber.domain.errors import (
     AsrFailed,
     JobCancelled,
+    JobLeaseLost,
     ModelLoadFailed,
 )
 from lecture_transcriber.domain.models import TranscriptionOptions
@@ -59,13 +60,13 @@ def _info(
     language: str = "ru",
     probability: float = 0.99,
     duration: float = 10.0,
-    segments_after_vad: int = 9,
+    duration_after_vad: float = 9.0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         language=language,
         language_probability=probability,
         duration=duration,
-        segments_after_vad=segments_after_vad,
+        duration_after_vad=duration_after_vad,
     )
 
 
@@ -225,6 +226,44 @@ def test_cancellation_raises_job_cancelled(tmp_path: Path) -> None:
 
     with pytest.raises(JobCancelled):
         engine.transcribe(tmp_path / "a.wav", _options(), on_segment, lambda: False)
+
+
+def test_callback_exception_is_not_reclassified_as_asr_failure(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(
+        segments=(_sdk_segment(start=0.0, end=0.5, text="a"),)
+    )
+    engine = FasterWhisperEngine(
+        model_dir=tmp_path,
+        offline=True,
+        runtime_factory=_factory(runtime),
+    )
+
+    def on_segment(_seg: object) -> None:
+        raise JobLeaseLost("lease lost")
+
+    with pytest.raises(JobLeaseLost):
+        engine.transcribe(tmp_path / "a.wav", _options(), on_segment, lambda: False)
+
+
+def test_vad_duration_uses_duration_after_vad(tmp_path: Path) -> None:
+    runtime = _FakeRuntime(
+        segments=(_sdk_segment(start=0.0, end=1.0, text="a"),),
+        info=_info(duration=10.0, duration_after_vad=6.25),
+    )
+    engine = FasterWhisperEngine(
+        model_dir=tmp_path,
+        offline=True,
+        runtime_factory=_factory(runtime),
+    )
+
+    result = engine.transcribe(
+        tmp_path / "a.wav",
+        _options(),
+        lambda _s: None,
+        lambda: False,
+    )
+
+    assert result.vad_duration_seconds == 6.25
 
 
 def test_translate_options_passed_to_runtime(tmp_path: Path) -> None:

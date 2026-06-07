@@ -313,6 +313,12 @@ class Transcript:
         _require_optional_finite("vad_duration_seconds", self.vad_duration_seconds)
         if self.vad_duration_seconds is not None and self.vad_duration_seconds < 0:
             raise ValueError("vad_duration_seconds must be non-negative")
+        indexes = tuple(segment.index for segment in self.segments)
+        if indexes != tuple(range(len(self.segments))):
+            raise ValueError("segment indexes must be unique, ordered and contiguous")
+        starts = tuple(segment.start for segment in self.segments)
+        if starts != tuple(sorted(starts)):
+            raise ValueError("segments must be in chronological order")
 
     def to_canonical_dict(self) -> dict[str, Any]:
         """Produce a stable, JSON-serialisable dict for canonical output."""
