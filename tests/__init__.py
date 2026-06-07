@@ -1,1 +1,1 @@
-# Test package for Lecture Transcriber
+"""Test package for Lecture Transcriber 2.0."""
