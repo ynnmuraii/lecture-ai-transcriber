@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          # ffmpeg gives us the libmp3lame codec that PyAV uses for MP3 fixtures.
+          # We avoid linking against LAME directly; ffmpeg is enough.
+
+      - name: Install Python package (with dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check src tests
+
+      - name: Type check (mypy --strict)
+        run: mypy src/lecture_transcriber
+
+      - name: Test (no model)
+        run: pytest -q --no-header
+
+      - name: Smoke (offline, format probe)
+        run: pytest -q tests/smoke --no-header

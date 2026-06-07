@@ -1,93 +1,136 @@
-# Lecture Transcriber
+# Lecture AI Transcriber (2.0)
 
-An LLM-based tool for automatic transcription of video lectures and creation of structured notes with GPU acceleration support.
+A **local-first** lecture transcriber: upload an audio or video file in
+the browser (or on the command line), and the application returns a
+canonical JSON transcript plus TXT, SRT, and VTT exports. Everything
+runs on your machine — no cloud, no telemetry, no hidden uploads.
 
-## Features
+* **ASR engine:** [`faster-whisper`](https://github.com/Syswin/faster-whisper)
+  (CTranslate2 runtime, CPU by default, CUDA when available).
+* **Persistence:** local SQLite (WAL) — no external database.
+* **Web UI:** FastAPI + Jinja2 + vanilla JavaScript. No build step.
+* **CLI:** Typer. The CLI and the web app share one application
+  container.
 
-- **Audio Extraction**: Extract audio from MP4, MKV, and WebM video files
-- **Speech Recognition**: Use advanced Whisper models for accurate transcription:
-  - `openai/whisper-tiny` - Fast testing and resource-constrained systems
-  - `openai/whisper-medium` - Balanced quality and speed (default)
-  - `openai/whisper-large-v3` - Maximum quality for powerful hardware
-  - `openai/whisper-large-v3-turbo` - Fast processing with high quality
-  - `antony66/whisper-large-v3-russian` - Specialized model for Russian language
-- **Intelligent Text Processing**: Use Qwen2.5-1.5B-Instruct for:
-  - Text preprocessing and filler word removal
-  - Intelligent segment merging
-  - Technical content identification
-  - Text summarization
-- **Formula Formatting**: Convert Russian mathematical expressions to proper notation
-- **Structured Output**: Generate Markdown notes with timestamps and metadata
-- **Resource Management**: Automatic model selection based on system resources
-- **Virtual Environment**: Complete dependency isolation
+The 2.0 rewrite is a clean break from the 1.x pipeline. See
+[`docs/architecture/ARD.md`](docs/architecture/ARD.md) for the design
+and [`decisions/`](decisions/) for the architecture decision records.
 
 ## Requirements
 
-### System Requirements
-- Python 3.8 or higher
-- FFmpeg (for audio processing)
-- 8GB+ RAM recommended (4GB minimum)
-- GPU optional but highly recommended for performance
+* Python **3.11** or **3.12** (tested on both).
+* A working C/C++ toolchain (already required by `faster-whisper`'s
+  transitive deps).
+* About **4 GB of free disk** for the smallest usable model
+  (`small`); `medium` and `large-v3` need more.
+* Optional: an NVIDIA GPU with CUDA for ~5× speed-up.
 
-### GPU Requirements (Optional)
-- **NVIDIA**: GTX 1060+ or RTX series with 4GB+ VRAM
-- **Apple**: M1/M2/M3 with 8GB+ unified memory  
-- **AMD**: RX 6000+ series with ROCm support
+## Install
 
-### Storage Requirements
-- Base installation: ~2GB
-- Model cache: 5-15GB (depending on selected models)
-- Working space: 1-5GB per video file
+```bash
+git clone https://github.com/ynnmuraii/lecture-ai-transcriber
+cd lecture-ai-transcriber
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux / macOS:
+source .venv/bin/activate
+
+pip install -e ".[dev]"
+```
+
+The first run needs at least one model cached locally:
+
+```bash
+lecture-transcriber models download small
+```
+
+## Quick start (CLI)
+
+```bash
+# Transcribe a file end-to-end (waits for the job to finish).
+lecture-transcriber transcribe path/to/lecture.mp4 --language ru
+
+# Show the JSON, TXT, SRT, and VTT paths of the last job.
+lecture-transcriber jobs list
+lecture-transcriber jobs show <job-id>
+
+# Copy a single artifact to a known location.
+lecture-transcriber export <job-id> --format srt --output lecture.srt
+```
+
+## Quick start (Web UI)
+
+```bash
+lecture-transcriber serve --host 127.0.0.1 --port 8000
+```
+
+Then open <http://127.0.0.1:8000/> in your browser. The page polls
+`/api/jobs/{id}` every 2 seconds while a job is in flight, and stops
+once the status is `completed`, `failed`, or `cancelled`.
 
 ## Configuration
 
-The system is highly configurable through `config/config.yaml`. Key settings include:
+All settings are environment variables with the
+`LECTURE_TRANSCRIBER_` prefix.
 
-### GPU Settings
-```yaml
-resources:
-  device: "auto"  # Options: "auto", "cpu", "cuda", "mps"
-  gpu:
-    enabled: true
-    memory_fraction: 0.8  # Use 80% of GPU memory
-    fallback_to_cpu: true
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LECTURE_TRANSCRIBER_DATA_DIR` | `./data` | Where the SQLite DB, models, media, and jobs live. |
+| `LECTURE_TRANSCRIBER_OFFLINE` | `false` | If `true`, never reach out to the network — useful for air-gapped machines. |
+| `LECTURE_TRANSCRIBER_MAX_UPLOAD_BYTES` | `4294967296` (4 GiB) | Hard limit for the web upload. |
+| `LECTURE_TRANSCRIBER_HOST` | `127.0.0.1` | Bind host for `serve`. |
+| `LECTURE_TRANSCRIBER_PORT` | `8000` | Bind port for `serve`. |
+
+## API surface (HTTP)
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/system` | Diagnostics: data dir, hardware, available models, ASR version. |
+| POST | `/api/media` | Upload a media file (multipart). Returns the media row. |
+| POST | `/api/jobs` | Create a job for an existing media row. |
+| GET | `/api/jobs?limit=N` | List recent jobs. |
+| GET | `/api/jobs/{id}` | Job detail (status, progress, events, artifacts). |
+| POST | `/api/jobs/{id}/cancel` | Cooperative cancel. |
+| GET | `/api/artifacts/{id}` | Download a produced artifact. |
+| GET | `/` `/system` `/jobs/{id}` | HTML pages (Jinja2). |
+
+Errors are returned as a unified envelope:
+
+```json
+{ "error": { "code": "MEDIA_NOT_FOUND", "message": "...", "action": "..." } }
 ```
 
-### Model Selection
-- **Whisper Models**: Choose based on your hardware:
-  - `openai/whisper-tiny` (500MB RAM) - Fast testing and limited resources
-  - `openai/whisper-base` (1GB RAM) - Basic quality  
-  - `openai/whisper-medium` (2GB RAM) - Balanced quality and speed (recommended)
-  - `openai/whisper-large-v3` (8GB RAM) - Maximum quality
-  - `openai/whisper-large-v3-turbo` (6GB RAM) - Fast processing with high quality
-  - `antony66/whisper-large-v3-russian` (8GB RAM) - Specialized for Russian language
+## Testing
 
-### Text Processing
-- **LLM Provider**: Qwen2.5-1.5B-Instruct for intelligent text processing
-- **Text Cleaning**: Customizable filler words and cleaning intensity
-- **Formula Processing**: Mathematical term mappings for Russian expressions
-- **Output Format**: Markdown with timestamps and metadata
-
-## Troubleshooting
-
-### Performance Issues
-- Use GPU acceleration when available
-- Enable flash attention for compatible models
-- Process shorter video segments for large files
-
-## Development
-
-This project follows a modular pipeline architecture with comprehensive testing:
-
-- **Unit Tests**: Test specific functionality and edge cases
-- **Property-Based Tests**: Validate universal properties across diverse inputs
-- **Integration Tests**: Test end-to-end pipeline functionality
-
-Run tests with:
 ```bash
-pytest tests/
+# Unit + contract + integration tests, no model needed.
+pytest -q
+
+# Linting & types
+ruff check src tests
+mypy src/lecture_transcriber
+```
+
+The benchmark harness (`lecture-transcriber benchmark …`) lives in
+`benchmarks/` and is opt-in — see [`benchmarks/README.md`](benchmarks/README.md)
+for the manifest format.
+
+## Project layout
+
+```
+src/lecture_transcriber/
+  domain/            # enums, value objects, ports, errors
+  application/       # use cases (CreateJob, RunJob, …), exporters
+  transcription/     # faster-whisper adapter, profile selector
+  infrastructure/    # SQLite, file store, hardware probe, worker
+  web/               # FastAPI app, routers, templates, static
+  cli/               # Typer commands
+  bootstrap.py       # Composition root (ApplicationContainer)
+tests/
+  unit/  contract/  integration/  smoke/  …
 ```
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT — see `LICENSE`.
