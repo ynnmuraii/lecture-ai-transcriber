@@ -1,0 +1,3 @@
+# Keep the private corpus and its references out of git.
+*
+!.gitignore

@@ -286,6 +286,53 @@ def main_callback(
     _ = ctx
 
 
+_OPT_FORMAT = typer.Option("txt", "--format")
+_OPT_BENCHMARK_OUTPUT = typer.Option(None, "--output", "-o")
+_OPT_BENCHMARK_MODELS = typer.Option("small", "--models", help="Comma-separated model names.")
+_BENCHMARK_ARG = typer.Argument(..., help="Path to a benchmark manifest JSON.")
+
+
+@app.command("benchmark")
+def benchmark(
+    manifest: Path = _BENCHMARK_ARG,
+    models: str = _OPT_BENCHMARK_MODELS,
+    output: Path | None = _OPT_BENCHMARK_OUTPUT,
+) -> None:
+    """Run a benchmark manifest and emit a JSON report."""
+    from lecture_transcriber.benchmark import (
+        BenchmarkHarness,
+        load_manifest,
+    )
+    from lecture_transcriber.transcription.faster_whisper_engine import (
+        FasterWhisperEngine,
+    )
+
+    settings = Settings()
+    settings.ensure_directories()
+    cases = load_manifest(manifest)
+    if not cases:
+        _err("EMPTY_MANIFEST", "manifest contains no cases")
+
+    reports: list[dict[str, object]] = []
+    for model_name in (m.strip() for m in models.split(",") if m.strip()):
+        engine = FasterWhisperEngine(
+            model_dir=settings.model_dir, offline=settings.offline
+        )
+        harness = BenchmarkHarness(engine=engine)
+        report = harness.run(cases, model_name=model_name)
+        reports.append(report.to_json())
+
+    payload: dict[str, object] = {"reports": reports}
+    if output is not None:
+        output.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        typer.echo(f"wrote {output}")
+    else:
+        _emit_json(payload)
+
+
 def main() -> None:  # pragma: no cover - thin wrapper
     try:
         app()

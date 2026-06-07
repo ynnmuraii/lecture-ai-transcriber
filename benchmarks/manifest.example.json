@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {
+      "id": "ru-clean-01",
+      "audio": "private/ru-clean-01.wav",
+      "reference": "private/ru-clean-01.txt",
+      "tags": ["ru", "clean", "lecture"]
+    }
+  ]
+}
