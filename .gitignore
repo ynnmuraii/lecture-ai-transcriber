@@ -50,8 +50,10 @@ Thumbs.db
 temp/
 logs/
 *.log
-model_cache/
 output/
+test_output/
+test_temp/
+data/
 *.wav
 *.mp4
 *.mkv
