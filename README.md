@@ -5,7 +5,7 @@ the browser (or on the command line), and the application returns a
 canonical JSON transcript plus TXT, SRT, and VTT exports. Everything
 runs on your machine — no cloud, no telemetry, no hidden uploads.
 
-* **ASR engine:** [`faster-whisper`](https://github.com/Syswin/faster-whisper)
+* **ASR engine:** [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper)
   (CTranslate2 runtime, CPU by default, CUDA when available).
 * **Persistence:** local SQLite (WAL) — no external database.
 * **Web UI:** FastAPI + Jinja2 + vanilla JavaScript. No build step.
@@ -113,8 +113,46 @@ mypy src/lecture_transcriber
 ```
 
 The benchmark harness (`lecture-transcriber benchmark …`) lives in
-`benchmarks/` and is opt-in — see [`benchmarks/README.md`](benchmarks/README.md)
-for the manifest format.
+[`benchmarks/`](benchmarks/) and is opt-in — see
+[`benchmarks/README.md`](benchmarks/README.md) for the manifest format.
+
+## Continuous integration
+
+Every push and pull request to `main` or `dev` runs the same checks
+the maintainer runs locally, on a 2 × 2 matrix:
+
+* **OS:** `ubuntu-latest`, `windows-latest`
+* **Python:** 3.11, 3.12
+
+The pipeline is deliberately small and fast — about 30 s on a cold
+runner — so it stays a useful signal instead of becoming a chore to
+maintain. It runs in this order:
+
+1. **`pip install -e ".[dev]"`** — pins the actual production deps
+   the user would install, so a broken constraint on a fresh OS
+   image fails the PR.
+2. **`ruff check src tests`** — style, import order, and the rules we
+   care about (B, E, F, I, RUF, SIM, UP).
+3. **`mypy src/lecture_transcriber`** — the package is `strict`; CI
+   catches any new `Any`, missing return type, or unguarded cast.
+4. **`pytest -q`** — unit + contract + integration. No real model is
+   involved; the in-memory and SQLite fakes drive the end-to-end
+   job flow. ~140 tests, runs in ~4 s.
+5. **`pytest -q tests/smoke`** — the offline probes (WAV / MP3 / MP4
+   via PyAV) and the network-call guard. This test *must* run on
+   every PR because it is the only thing that proves the web app
+   does not silently reach out to the internet.
+
+The model-backed smoke (`tests/smoke/test_model_transcription.py`,
+marker `model`) is **not** part of CI. Downloading a multi-GB model
+on every PR is wasteful and a real faster-whisper test depends on
+host hardware. It is run manually:
+
+```bash
+LECTURE_TRANSCRIBER_TEST_MODEL=small pytest -q -m model
+```
+
+See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## Project layout
 

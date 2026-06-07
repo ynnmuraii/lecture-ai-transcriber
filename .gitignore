@@ -24,7 +24,6 @@ wheels/
 MANIFEST
 
 # Virtual environments
-lecture_transcriber_env/
 .venv/
 venv/
 env/
