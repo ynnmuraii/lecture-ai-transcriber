@@ -135,12 +135,18 @@ class InMemoryArtifactRepository(ArtifactRepository):
 class InMemoryJobRepository(JobRepository):
     """Single-worker lease manager kept honest by ``sqlite`` in real tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, event_repo: JobEventRepository | None = None) -> None:
         self._jobs: dict[UUID, TranscriptionJob] = {}
         self._leases: dict[UUID, tuple[str, datetime]] = {}
+        self._event_repo = event_repo
 
     def add(self, job: TranscriptionJob) -> None:
         self._jobs[job.id] = job
+
+    def add_with_event(self, job: TranscriptionJob, event: JobEvent) -> None:
+        self.add(job)
+        if self._event_repo is not None:
+            self._event_repo.append(event)
 
     def get(self, job_id: UUID) -> TranscriptionJob | None:
         return self._jobs.get(job_id)
@@ -164,6 +170,22 @@ class InMemoryJobRepository(JobRepository):
                 return job
         return None
 
+    def claim(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> TranscriptionJob | None:
+        job = self._jobs.get(job_id)
+        if job is None or job.status != JobStatus.QUEUED:
+            return None
+        job.worker_id = worker_id
+        from datetime import timedelta
+
+        job.lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
+        job.transition_to(JobStatus.PROBING)
+        return job
+
     def save_progress(
         self,
         job_id: UUID,
@@ -175,6 +197,18 @@ class InMemoryJobRepository(JobRepository):
         if not job.is_terminal():
             job.transition_to(status, message=message)
         job.update_progress(progress, message=message)
+
+    def save_progress_with_event(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        progress: int,
+        message: str | None,
+        event: JobEvent,
+    ) -> None:
+        self.save_progress(job_id, status, progress, message)
+        if self._event_repo is not None:
+            self._event_repo.append(event)
 
     def mark_failed(
         self,

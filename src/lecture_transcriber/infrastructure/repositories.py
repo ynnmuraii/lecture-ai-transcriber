@@ -14,7 +14,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -104,17 +104,7 @@ class SqlArtifactRepository(ArtifactRepository):
 
     def add(self, artifact: Artifact) -> None:
         with self._session_factory() as session:
-            session.add(
-                ArtifactRecord(
-                    id=str(artifact.id),
-                    job_id=str(artifact.job_id),
-                    format=artifact.format,
-                    relative_path=artifact.relative_path,
-                    size_bytes=artifact.size_bytes,
-                    sha256=artifact.sha256,
-                    created_at=artifact.created_at,
-                )
-            )
+            session.add(_artifact_to_record(artifact))
             session.commit()
 
     def list_for_job(self, job_id: UUID) -> tuple[Artifact, ...]:
@@ -136,16 +126,7 @@ class SqlJobEventRepository(JobEventRepository):
 
     def append(self, event: JobEvent) -> None:
         with self._session_factory() as session:
-            session.add(
-                JobEventRecord(
-                    id=str(event.id),
-                    job_id=str(event.job_id),
-                    occurred_at=event.occurred_at,
-                    status=event.status.value,
-                    message=event.message,
-                    error_code=event.error_code,
-                )
-            )
+            session.add(_event_to_record(event))
             session.commit()
 
     def list_for_job(self, job_id: UUID) -> tuple[JobEvent, ...]:
@@ -182,29 +163,15 @@ class SqlJobRepository(JobRepository):
 
     def add(self, job: TranscriptionJob) -> None:
         with self._session_factory() as session:
-            session.add(
-                JobRecord(
-                    id=str(job.id),
-                    media_id=str(job.media_id),
-                    status=job.status.value,
-                    progress=job.progress,
-                    stage_message=job.stage_message,
-                    requested_language=job.requested_language,
-                    requested_model=job.requested_model,
-                    effective_profile_json=_hardware_profile_to_json(
-                        job.effective_profile
-                    ),
-                    options_json=json.dumps(job.options.to_jsonable(), ensure_ascii=False),
-                    cancel_requested=job.cancel_requested,
-                    worker_id=job.worker_id,
-                    lease_expires_at=job.lease_expires_at,
-                    error_code=job.error_code,
-                    error_message=job.error_message,
-                    created_at=job.created_at,
-                    started_at=job.started_at,
-                    completed_at=job.completed_at,
-                )
-            )
+            session.add(_job_to_record(job))
+            session.commit()
+
+    def add_with_event(self, job: TranscriptionJob, event: JobEvent) -> None:
+        if event.job_id != job.id:
+            raise ValueError("event.job_id must match job.id")
+        with self._session_factory() as session:
+            session.add(_job_to_record(job))
+            session.add(_event_to_record(event))
             session.commit()
 
     def save_progress(
@@ -215,18 +182,32 @@ class SqlJobRepository(JobRepository):
         message: str | None,
     ) -> None:
         with self._session_factory() as session:
-            record = session.get(JobRecord, str(job_id), with_for_update=True)
+            record = session.get(JobRecord, str(job_id))
             if record is None:
                 return
-            current_status = JobStatus(record.status)
-            if _is_terminal(current_status):
+            job = _job_from_record(record)
+            _apply_progress(job, status, progress, message)
+            _copy_job_to_record(job, record)
+            session.commit()
+
+    def save_progress_with_event(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        progress: int,
+        message: str | None,
+        event: JobEvent,
+    ) -> None:
+        if event.job_id != job_id or event.status != status:
+            raise ValueError("event must describe the same job transition")
+        with self._session_factory() as session:
+            record = session.get(JobRecord, str(job_id))
+            if record is None:
                 return
-            record.status = status.value
-            record.progress = max(record.progress, progress)
-            if message is not None:
-                record.stage_message = message
-            if _is_terminal(status):
-                record.completed_at = _utcnow()
+            job = _job_from_record(record)
+            _apply_progress(job, status, progress, message)
+            _copy_job_to_record(job, record)
+            session.add(_event_to_record(event))
             session.commit()
 
     def mark_failed(
@@ -236,21 +217,14 @@ class SqlJobRepository(JobRepository):
         error_message: str,
     ) -> None:
         with self._session_factory() as session:
-            record = session.get(JobRecord, str(job_id), with_for_update=True)
+            record = session.get(JobRecord, str(job_id))
             if record is None:
                 return
-            current_status = JobStatus(record.status)
-            if current_status in {
-                JobStatus.COMPLETED,
-                JobStatus.FAILED,
-                JobStatus.CANCELLED,
-                JobStatus.COMPLETED_WITH_WARNINGS,
-            }:
+            job = _job_from_record(record)
+            if job.is_terminal():
                 return
-            record.status = JobStatus.FAILED.value
-            record.error_code = error_code
-            record.error_message = error_message
-            record.completed_at = _utcnow()
+            job.mark_failed(error_code, error_message)
+            _copy_job_to_record(job, record)
             session.commit()
 
     def request_cancel(self, job_id: UUID) -> bool:
@@ -280,33 +254,40 @@ class SqlJobRepository(JobRepository):
 
     def claim_next(self, worker_id: str, lease_seconds: int) -> TranscriptionJob | None:
         with self._session_factory() as session:
-            # Find oldest queued job; expired leases handled by recover_expired_leases.
+            session.execute(text("BEGIN IMMEDIATE"))
             stmt = (
                 select(JobRecord)
                 .where(JobRecord.status == JobStatus.QUEUED.value)
                 .order_by(JobRecord.created_at)
                 .limit(1)
-                .with_for_update(skip_locked=False)
             )
             record = session.scalars(stmt).first()
             if record is None:
+                session.rollback()
                 return None
-            record.worker_id = worker_id
-            record.lease_expires_at = _utcnow() + timedelta(seconds=lease_seconds)
-            record.status = JobStatus.PROBING.value
-            record.started_at = record.started_at or _utcnow()
-            session.add(
-                JobEventRecord(
-                    id=str(uuid4()),
-                    job_id=record.id,
-                    occurred_at=_utcnow(),
-                    status=JobStatus.PROBING.value,
-                    message="claimed",
-                    error_code=None,
-                )
-            )
+            job = _claim_record(record, worker_id, lease_seconds, session)
             session.commit()
-            return _job_from_record(record)
+            return job
+
+    def claim(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> TranscriptionJob | None:
+        with self._session_factory() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            stmt = select(JobRecord).where(
+                JobRecord.id == str(job_id),
+                JobRecord.status == JobStatus.QUEUED.value,
+            )
+            record = session.scalars(stmt).first()
+            if record is None:
+                session.rollback()
+                return None
+            job = _claim_record(record, worker_id, lease_seconds, session)
+            session.commit()
+            return job
 
     def recover_expired_leases(self) -> int:
         recovered = 0
@@ -370,6 +351,107 @@ class SessionFactory:
 
     def __call__(self) -> Session:
         return Session(self._engine, future=True, expire_on_commit=False)
+
+    @property
+    def engine(self) -> Engine:
+        return self._engine
+
+
+def _apply_progress(
+    job: TranscriptionJob,
+    status: JobStatus,
+    progress: int,
+    message: str | None,
+) -> None:
+    if job.is_terminal():
+        return
+    if status != job.status:
+        job.transition_to(status, message=message)
+    job.update_progress(max(job.progress, progress), message=message)
+
+
+def _claim_record(
+    record: JobRecord,
+    worker_id: str,
+    lease_seconds: int,
+    session: Session,
+) -> TranscriptionJob:
+    job = _job_from_record(record)
+    job.worker_id = worker_id
+    job.lease_expires_at = _utcnow() + timedelta(seconds=lease_seconds)
+    job.transition_to(JobStatus.PROBING, message="claimed")
+    _copy_job_to_record(job, record)
+    session.add(
+        _event_to_record(
+            JobEvent(
+                id=uuid4(),
+                job_id=job.id,
+                occurred_at=_utcnow(),
+                status=JobStatus.PROBING,
+                message="claimed",
+                error_code=None,
+            )
+        )
+    )
+    return job
+
+
+def _job_to_record(job: TranscriptionJob) -> JobRecord:
+    return JobRecord(
+        id=str(job.id),
+        media_id=str(job.media_id),
+        status=job.status.value,
+        progress=job.progress,
+        stage_message=job.stage_message,
+        requested_language=job.requested_language,
+        requested_model=job.requested_model,
+        effective_profile_json=_hardware_profile_to_json(job.effective_profile),
+        options_json=json.dumps(job.options.to_jsonable(), ensure_ascii=False),
+        cancel_requested=job.cancel_requested,
+        worker_id=job.worker_id,
+        lease_expires_at=job.lease_expires_at,
+        error_code=job.error_code,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+    )
+
+
+def _copy_job_to_record(job: TranscriptionJob, record: JobRecord) -> None:
+    record.status = job.status.value
+    record.progress = job.progress
+    record.stage_message = job.stage_message
+    record.cancel_requested = job.cancel_requested
+    record.worker_id = job.worker_id
+    record.lease_expires_at = job.lease_expires_at
+    record.error_code = job.error_code
+    record.error_message = job.error_message
+    record.started_at = job.started_at
+    record.completed_at = job.completed_at
+
+
+def _event_to_record(event: JobEvent) -> JobEventRecord:
+    return JobEventRecord(
+        id=str(event.id),
+        job_id=str(event.job_id),
+        occurred_at=event.occurred_at,
+        status=event.status.value,
+        message=event.message,
+        error_code=event.error_code,
+    )
+
+
+def _artifact_to_record(artifact: Artifact) -> ArtifactRecord:
+    return ArtifactRecord(
+        id=str(artifact.id),
+        job_id=str(artifact.job_id),
+        format=artifact.format,
+        relative_path=artifact.relative_path,
+        size_bytes=artifact.size_bytes,
+        sha256=artifact.sha256,
+        created_at=artifact.created_at,
+    )
 
 
 def _media_from_record(record: MediaRecord) -> Media:

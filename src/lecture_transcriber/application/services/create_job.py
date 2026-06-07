@@ -102,8 +102,8 @@ class CreateJobService:
             options=options,
             created_at=now,
         )
-        self._job_repo.add(job)
-        self._event_repo.append(
+        self._job_repo.add_with_event(
+            job,
             JobEvent(
                 id=uuid4(),
                 job_id=job.id,
@@ -111,7 +111,7 @@ class CreateJobService:
                 status=JobStatus.QUEUED,
                 message="job created",
                 error_code=None,
-            )
+            ),
         )
 
         return JobSummary(

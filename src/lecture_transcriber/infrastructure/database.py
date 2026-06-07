@@ -7,16 +7,14 @@ web handlers.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import create_engine as _sqlalchemy_create_engine
 from sqlalchemy import event
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Engine
 
 from lecture_transcriber.infrastructure.config import Settings
-from lecture_transcriber.infrastructure.orm import Base
+from lecture_transcriber.infrastructure.migrations import migrate_database
 
 
 def create_engine(settings: Settings) -> Engine:
@@ -43,17 +41,5 @@ def _attach_pragmas(engine: Engine) -> None:
 
 
 def initialize_database(engine: Engine) -> None:
-    """Create all tables for a fresh database."""
-    Base.metadata.create_all(engine)
-
-
-@contextmanager
-def transaction(connection: Connection) -> Iterator[Connection]:
-    """Run a write transaction with explicit semantics.
-
-    For SQLite we want a ``BEGIN IMMEDIATE`` so the lease is taken before any
-    other writer can race us. SQLAlchemy's default transaction starts with
-    ``BEGIN DEFERRED`` which is not enough.
-    """
-    with connection.begin():
-        yield connection
+    """Apply all pending schema migrations."""
+    migrate_database(engine)

@@ -98,10 +98,11 @@ def test_cancel_is_idempotent_and_only_affects_active_jobs(stack) -> None:
     assert job.cancel_requested is True
     assert job.status == JobStatus.QUEUED
 
-    # Move to a terminal state via the repository (bypasses the aggregate's
-    # state-machine guards, which is exactly what a real FAILED job looks
-    # like to the cancel service).
-    stack["job_repo"].save_progress(  # type: ignore[attr-defined]
-        summary.id, JobStatus.COMPLETED, 100, "done"
-    )
+    repo = stack["job_repo"]  # type: ignore[assignment]
+    repo.claim(summary.id, "test-worker", lease_seconds=120)
+    repo.save_progress(summary.id, JobStatus.LOADING_MODEL, 20, "loading")
+    repo.save_progress(summary.id, JobStatus.TRANSCRIBING, 30, "transcribing")
+    repo.save_progress(summary.id, JobStatus.VALIDATING, 92, "validating")
+    repo.save_progress(summary.id, JobStatus.EXPORTING, 95, "exporting")
+    repo.save_progress(summary.id, JobStatus.COMPLETED, 100, "done")
     assert cancel.request(summary.id) is False

@@ -7,16 +7,18 @@ module; mapping is done explicitly in :mod:`repositories`.
 from __future__ import annotations
 
 from datetime import datetime
-from uuid import UUID
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -25,8 +27,11 @@ class Base(DeclarativeBase):
     pass
 
 
-def _uuid_str(value: UUID | str) -> str:
-    return str(value)
+class SchemaMigrationRecord(Base):
+    __tablename__ = "schema_migrations"
+
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class MediaRecord(Base):
@@ -45,6 +50,17 @@ class MediaRecord(Base):
 
 class JobRecord(Base):
     __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint("progress >= 0 AND progress <= 100", name="ck_jobs_progress"),
+        CheckConstraint(
+            "status IN ("
+            "'queued','probing','loading_model','transcribing','validating',"
+            "'exporting','completed','completed_with_warnings','failed','cancelled'"
+            ")",
+            name="ck_jobs_status",
+        ),
+        Index("ix_jobs_status_created_at", "status", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     media_id: Mapped[str] = mapped_column(
@@ -77,6 +93,9 @@ class JobRecord(Base):
 
 class JobEventRecord(Base):
     __tablename__ = "job_events"
+    __table_args__ = (
+        Index("ix_job_events_job_id_occurred_at", "job_id", "occurred_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     job_id: Mapped[str] = mapped_column(
@@ -94,6 +113,14 @@ class JobEventRecord(Base):
 
 class ArtifactRecord(Base):
     __tablename__ = "artifacts"
+    __table_args__ = (
+        UniqueConstraint("job_id", "format", name="uq_artifacts_job_format"),
+        CheckConstraint(
+            "format IN ('json','txt','srt','vtt')",
+            name="ck_artifacts_format",
+        ),
+        Index("ix_artifacts_job_id", "job_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     job_id: Mapped[str] = mapped_column(
@@ -112,4 +139,5 @@ __all__ = [
     "JobEventRecord",
     "JobRecord",
     "MediaRecord",
+    "SchemaMigrationRecord",
 ]

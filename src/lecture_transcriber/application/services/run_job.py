@@ -110,6 +110,17 @@ class RunJobService:
         """Execute a specific (already-claimed) job. Used by tests and by
         the CLI ``--wait`` path that wants to drive a single job deterministically.
         """
+        job = self._job_repo.get(job_id)
+        if job is None or job.is_terminal():
+            return
+        if job.status == JobStatus.QUEUED:
+            claimed = self._job_repo.claim(
+                job_id,
+                worker_id="local",
+                lease_seconds=120,
+            )
+            if claimed is None:
+                return
         self._execute(job_id)
 
     # --------------------------------------------------------------- pipeline

@@ -7,10 +7,14 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import event, inspect
+from sqlalchemy.exc import IntegrityError
 
 from lecture_transcriber.domain.enums import JobStatus
+from lecture_transcriber.domain.errors import InvalidStateTransition
 from lecture_transcriber.domain.models import (
     Artifact,
+    JobEvent,
     Media,
     MediaType,
     TranscriptionJob,
@@ -141,6 +145,80 @@ def test_events_are_appended_in_order(session_factory) -> None:
     assert [e.message for e in history] == ["step 0", "step 1", "step 2"]
 
 
+def test_database_has_schema_version_indexes_and_constraints(session_factory) -> None:
+    inspector = inspect(session_factory.engine)
+
+    assert "schema_migrations" in inspector.get_table_names()
+    job_indexes = {idx["name"] for idx in inspector.get_indexes("jobs")}
+    event_indexes = {idx["name"] for idx in inspector.get_indexes("job_events")}
+    artifact_indexes = {idx["name"] for idx in inspector.get_indexes("artifacts")}
+
+    assert "ix_jobs_status_created_at" in job_indexes
+    assert "ix_job_events_job_id_occurred_at" in event_indexes
+    assert "ix_artifacts_job_id" in artifact_indexes
+
+    artifact_uniques = {
+        tuple(item["column_names"])
+        for item in inspector.get_unique_constraints("artifacts")
+    }
+    assert ("job_id", "format") in artifact_uniques
+
+
+def test_add_job_with_event_is_atomic_success_path(session_factory) -> None:
+    media_repo = SqlMediaRepository(session_factory)
+    media = _make_media()
+    media_repo.add(media)
+
+    repo = SqlJobRepository(session_factory)
+    events = SqlJobEventRepository(session_factory)
+    job = TranscriptionJob(id=uuid4(), media_id=media.id)
+    event_row = JobEvent(
+        id=uuid4(),
+        job_id=job.id,
+        occurred_at=datetime(2026, 6, 7, tzinfo=UTC),
+        status=JobStatus.QUEUED,
+        message="job created",
+        error_code=None,
+    )
+
+    repo.add_with_event(job, event_row)  # type: ignore[attr-defined]
+
+    assert repo.get(job.id) is not None
+    assert events.list_for_job(job.id) == (event_row,)
+
+
+def test_save_progress_with_event_rejects_invalid_transition(session_factory) -> None:
+    media_repo = SqlMediaRepository(session_factory)
+    media = _make_media()
+    media_repo.add(media)
+
+    repo = SqlJobRepository(session_factory)
+    job = TranscriptionJob(id=uuid4(), media_id=media.id)
+    repo.add(job)
+    event_row = JobEvent(
+        id=uuid4(),
+        job_id=job.id,
+        occurred_at=datetime(2026, 6, 7, tzinfo=UTC),
+        status=JobStatus.TRANSCRIBING,
+        message="skip states",
+        error_code=None,
+    )
+
+    with pytest.raises(InvalidStateTransition):
+        repo.save_progress_with_event(  # type: ignore[attr-defined]
+            job.id,
+            JobStatus.TRANSCRIBING,
+            50,
+            "skip states",
+            event_row,
+        )
+
+    fetched = repo.get(job.id)
+    assert fetched is not None
+    assert fetched.status == JobStatus.QUEUED
+    assert fetched.progress == 0
+
+
 def _make_media() -> Media:
     return Media(
         id=uuid4(),
@@ -173,6 +251,20 @@ def test_artifact_lookup_is_scoped_by_job(session_factory) -> None:
 
     assert {a.format for a in repo.list_for_job(job_a_id)} == {"json", "txt"}
     assert {a.format for a in repo.list_for_job(job_b_id)} == {"json"}
+
+
+def test_duplicate_artifact_format_for_job_is_rejected(session_factory) -> None:
+    media_repo = SqlMediaRepository(session_factory)
+    media = _make_media()
+    media_repo.add(media)
+    jobs = SqlJobRepository(session_factory)
+    job_id = uuid4()
+    jobs.add(TranscriptionJob(id=job_id, media_id=media.id))
+
+    repo = SqlArtifactRepository(session_factory)
+    repo.add(_make_artifact(job_id, "json"))
+    with pytest.raises(IntegrityError):
+        repo.add(_make_artifact(job_id, "json"))
 
 
 def _make_artifact(job_id, fmt: str) -> Artifact:
@@ -208,6 +300,23 @@ def test_two_workers_cannot_claim_the_same_job(session_factory) -> None:
     assert first is not None
     assert first.id == job.id
     assert second is None
+
+
+def test_claim_next_uses_begin_immediate(session_factory) -> None:
+    statements: list[str] = []
+
+    @event.listens_for(session_factory.engine, "before_cursor_execute")
+    def _record_statement(_conn, _cursor, statement, _params, _context, _executemany):  # type: ignore[no-untyped-def]
+        statements.append(str(statement).upper())
+
+    media_repo = SqlMediaRepository(session_factory)
+    media = _make_media()
+    media_repo.add(media)
+    repo = SqlJobRepository(session_factory)
+    repo.add(TranscriptionJob(id=uuid4(), media_id=media.id))
+
+    assert repo.claim_next("worker-a", lease_seconds=120) is not None
+    assert any("BEGIN IMMEDIATE" in statement for statement in statements)
 
 
 def test_expired_lease_returns_to_queue_with_recovery_event(

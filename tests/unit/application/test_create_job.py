@@ -47,12 +47,13 @@ def _service(
     cache: InMemoryModelCache,
 ) -> CreateJobService:
     media_repo = InMemoryMediaRepository()
+    event_repo = InMemoryJobEventRepository()
     if media is not None:
         media_repo.add(media)
     return CreateJobService(
         media_repo=media_repo,
-        job_repo=InMemoryJobRepository(),
-        event_repo=InMemoryJobEventRepository(),
+        job_repo=InMemoryJobRepository(event_repo=event_repo),
+        event_repo=event_repo,
         hardware=StaticHardwareDetector(
             HardwareFacts(
                 ram_bytes=8 * 1024**3,

@@ -180,10 +180,17 @@ class ArtifactRepository(Protocol):
 @runtime_checkable
 class JobRepository(Protocol):
     def add(self, job: TranscriptionJob) -> None: ...
+    def add_with_event(self, job: TranscriptionJob, event: JobEvent) -> None: ...
     def get(self, job_id: UUID) -> TranscriptionJob | None: ...
     def list_recent(self, limit: int) -> tuple[TranscriptionJob, ...]: ...
     def claim_next(
         self, worker_id: str, lease_seconds: int
+    ) -> TranscriptionJob | None: ...
+    def claim(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        lease_seconds: int,
     ) -> TranscriptionJob | None: ...
     def save_progress(
         self,
@@ -191,6 +198,14 @@ class JobRepository(Protocol):
         status: JobStatus,
         progress: int,
         message: str | None,
+    ) -> None: ...
+    def save_progress_with_event(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        progress: int,
+        message: str | None,
+        event: JobEvent,
     ) -> None: ...
     def mark_failed(
         self,

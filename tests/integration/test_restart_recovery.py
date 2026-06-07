@@ -151,6 +151,9 @@ def test_expired_lease_is_recovered_and_job_re_runs(stack) -> None:
     job = job_repo.get(summary.id)
     assert job is not None
     job_repo.save_progress(  # type: ignore[attr-defined]
+        summary.id, JobStatus.LOADING_MODEL, 20, "loading"
+    )
+    job_repo.save_progress(  # type: ignore[attr-defined]
         summary.id, JobStatus.TRANSCRIBING, 50, "halfway"
     )
     # Manually expire the lease.
