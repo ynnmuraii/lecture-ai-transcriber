@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}System — Lecture AI Transcriber{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>System</h1>
+  <dl class="system-info">
+    <dt>Data dir</dt><dd id="info-data-dir">…</dd>
+    <dt>Offline</dt><dd id="info-offline">…</dd>
+    <dt>Max upload (bytes)</dt><dd id="info-max-upload">…</dd>
+    <dt>CPU count</dt><dd id="info-cpu">…</dd>
+    <dt>RAM (bytes)</dt><dd id="info-ram">…</dd>
+    <dt>CUDA</dt><dd id="info-cuda">…</dd>
+    <dt>ASR engine</dt><dd id="info-engine">…</dd>
+    <dt>ASR version</dt><dd id="info-version">…</dd>
+    <dt>Cached models</dt><dd id="info-models">…</dd>
+  </dl>
+</section>
+{% endblock %}

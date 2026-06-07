@@ -264,14 +264,22 @@ def export_artifact(
 def serve(
     host: str | None = typer.Option(None, "--host"),
     port: int | None = typer.Option(None, "--port"),
+    reload: bool = typer.Option(False, "--reload", help="Enable autoreload (dev only)."),
 ) -> None:
-    """Start the FastAPI app (placeholder: prints a hint, full server in Task 12)."""
+    """Start the FastAPI app via uvicorn."""
+    import uvicorn
+
     settings = Settings()
-    typer.echo(
-        f"web UI not implemented yet (planned for Task 12); "
-        f"would bind to {host or settings.host}:{port or settings.port}"
+    settings.ensure_directories()
+    cfg_host = host or settings.host
+    cfg_port = port or settings.port
+    uvicorn.run(
+        "lecture_transcriber.web.app:create_app",
+        host=cfg_host,
+        port=cfg_port,
+        reload=reload,
+        factory=True,
     )
-    raise typer.Exit(code=0)
 
 
 @app.callback()

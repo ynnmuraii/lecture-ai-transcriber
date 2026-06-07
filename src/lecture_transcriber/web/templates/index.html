@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}New transcription — Lecture AI Transcriber{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>New transcription</h1>
+  <form id="upload-form">
+    <label for="file">Media file</label>
+    <input id="file" name="file" type="file" accept="audio/*,video/*" required>
+    <label for="language">Language (optional, ISO code)</label>
+    <input id="language" name="language" type="text" maxlength="16" placeholder="ru">
+    <label for="model">Model override (optional)</label>
+    <select id="model" name="model">
+      <option value="">auto</option>
+    </select>
+    <button type="submit">Upload &amp; create job</button>
+  </form>
+  <p id="upload-status" class="status"></p>
+</section>
+
+<section class="card">
+  <h2>Recent jobs</h2>
+  <table class="jobs">
+    <thead><tr><th>ID</th><th>Media</th><th>Status</th><th>Progress</th><th>Created</th></tr></thead>
+    <tbody id="jobs-body"></tbody>
+  </table>
+  <p class="hint" id="jobs-empty">No jobs yet.</p>
+</section>
+{% endblock %}

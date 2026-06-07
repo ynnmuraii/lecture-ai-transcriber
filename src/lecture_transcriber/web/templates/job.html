@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job_id }} — Lecture AI Transcriber{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Job</h1>
+  <dl class="job-summary">
+    <dt>ID</dt><dd id="job-id">{{ job_id }}</dd>
+    <dt>Media</dt><dd id="job-media">…</dd>
+    <dt>Status</dt><dd id="job-status">…</dd>
+    <dt>Progress</dt><dd id="job-progress">…</dd>
+    <dt>Stage</dt><dd id="job-stage">…</dd>
+    <dt>Profile</dt><dd id="job-profile">…</dd>
+    <dt>Cancel requested</dt><dd id="job-cancel">…</dd>
+  </dl>
+  <div class="actions">
+    <button id="cancel-btn" type="button">Cancel job</button>
+    <button id="retry-btn" type="button" hidden>Retry</button>
+  </div>
+  <p id="job-error" class="error" hidden></p>
+</section>
+
+<section class="card">
+  <h2>Segments</h2>
+  <table class="segments">
+    <thead><tr><th>#</th><th>Start</th><th>End</th><th>Text</th><th>Warn</th></tr></thead>
+    <tbody id="segments-body"></tbody>
+  </table>
+  <p class="hint" id="segments-empty">No segments yet.</p>
+</section>
+
+<section class="card">
+  <h2>Downloads</h2>
+  <ul id="artifacts"></ul>
+  <p class="hint" id="artifacts-empty">No artifacts yet.</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/job.js" defer></script>
+{% endblock %}

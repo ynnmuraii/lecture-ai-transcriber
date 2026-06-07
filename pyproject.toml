@@ -46,6 +46,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["RUF001"]
+"src/lecture_transcriber/web/**" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"
