@@ -54,6 +54,7 @@ from lecture_transcriber.infrastructure.repositories import (
 )
 from lecture_transcriber.infrastructure.worker import LocalWorker
 from lecture_transcriber.transcription.profiles import ProfileSelector
+from lecture_transcriber.web import app as web_app_module
 from lecture_transcriber.web.app import create_app
 from lecture_transcriber.web.routes import media as media_routes
 from tests.contract.fakes import (
@@ -216,6 +217,53 @@ def test_system_endpoint_returns_diagnostics(client: TestClient) -> None:
     assert isinstance(body["hardware"]["cuda_available"], bool)
 
 
+def test_lifespan_uses_configured_worker_intervals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        worker_lease_seconds=45,
+        worker_poll_interval_seconds=0.25,
+        worker_shutdown_timeout_seconds=2.0,
+    )
+    settings.ensure_directories()
+    container, _sf, _cache = _build_container(settings)
+    captured: dict[str, float] = {}
+
+    class _RecordingWorker:
+        def __init__(
+            self,
+            *,
+            job_repo,
+            runner,
+            poll_interval_seconds,
+            lease_seconds,
+            heartbeat_interval_seconds,
+        ):  # type: ignore[no-untyped-def]
+            del job_repo, runner
+            captured["poll"] = poll_interval_seconds
+            captured["lease"] = lease_seconds
+            captured["heartbeat"] = heartbeat_interval_seconds
+
+        def run_forever(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(web_app_module, "LocalWorker", _RecordingWorker)
+    app = create_app(
+        settings=settings,
+        container_factory=lambda _settings: container,
+    )
+
+    with TestClient(app):
+        pass
+
+    assert captured == {"poll": 0.25, "lease": 45, "heartbeat": 15.0}
+
+
 def test_upload_rejects_unsupported_format(client: TestClient) -> None:
     r = client.post(
         "/api/media",
@@ -280,6 +328,30 @@ def test_create_job_for_missing_media_returns_404(client: TestClient) -> None:
     assert r.status_code == 404
     body = r.json()
     assert body["error"]["code"] == "MEDIA_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "payload"),
+    [
+        ("/api/jobs/not-a-uuid", "get", None),
+        ("/api/jobs", "post", {"media_id": "not-a-uuid"}),
+        ("/api/jobs?limit=0", "get", None),
+        ("/api/jobs?limit=101", "get", None),
+    ],
+)
+def test_validation_errors_use_unified_error_envelope(
+    client: TestClient,
+    path: str,
+    method: str,
+    payload: dict[str, str] | None,
+) -> None:
+    response = client.request(method, path, json=payload)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "INVALID_INPUT"
+    assert isinstance(body["error"]["message"], str)
+    assert "detail" not in body
 
 
 def test_create_job_uses_default_profile(client: TestClient, tmp_path: Path) -> None:

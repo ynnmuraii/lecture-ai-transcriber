@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
 from lecture_transcriber.application.dto import JobDetail, JobSummary
@@ -68,7 +69,7 @@ def create_job(
 
 @router.get("", response_model=list[JobSummaryOut])
 def list_jobs(
-    limit: int = 20,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
     get: GetJobService = Depends(get_get_job),
 ) -> list[JobSummaryOut]:
     items = get.list_recent(limit)

@@ -46,8 +46,13 @@ def test_model_dir_respects_explicit_override(tmp_path: Path) -> None:
         ("port", 0),
         ("port", 65_536),
         ("max_upload_bytes", 0),
+        ("max_upload_bytes", 1024**4 + 1),
         ("worker_lease_seconds", 0),
-        ("worker_poll_interval_seconds", -0.1),
+        ("worker_lease_seconds", 86_401),
+        ("worker_poll_interval_seconds", 0),
+        ("worker_poll_interval_seconds", 60.1),
+        ("worker_shutdown_timeout_seconds", 0),
+        ("worker_shutdown_timeout_seconds", 301),
         ("log_level", "LOUD"),
     ],
 )
@@ -58,3 +63,18 @@ def test_settings_reject_invalid_runtime_values(
 ) -> None:
     with pytest.raises(ValidationError):
         Settings(data_dir=tmp_path, **{field: value})
+
+
+def test_settings_reject_remote_bind_without_explicit_opt_in(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="unsafe network bind"):
+        Settings(data_dir=tmp_path, host="0.0.0.0")
+
+
+def test_settings_allow_explicit_unsafe_network_bind(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        host="0.0.0.0",
+        allow_unsafe_network_bind=True,
+    )
+
+    assert settings.host == "0.0.0.0"

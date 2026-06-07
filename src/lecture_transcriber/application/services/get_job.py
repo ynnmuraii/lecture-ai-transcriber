@@ -68,6 +68,8 @@ class GetJobService:
         )
 
     def list_recent(self, limit: int) -> tuple[JobSummary, ...]:
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
         items = self._job_repo.list_recent(limit)
         out: list[JobSummary] = []
         for job in items:

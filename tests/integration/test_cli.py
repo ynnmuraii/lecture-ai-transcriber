@@ -239,5 +239,19 @@ def test_invalid_job_id_returns_nonzero(env) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["jobs", "show", "not-a-uuid"])
     assert result.exit_code != 0
+
+
+def test_serve_rejects_unsafe_host_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append(args))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
+
+    assert result.exit_code != 0
+    assert "unsafe network bind" in result.output
+    assert calls == []
     # No traceback leaked.
     assert "Traceback" not in result.stdout

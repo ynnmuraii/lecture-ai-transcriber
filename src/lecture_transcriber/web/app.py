@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -43,7 +44,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.worker = LocalWorker(
         job_repo=container.job_repo,
         runner=container.run_job,
-        poll_interval_seconds=1.0,
+        poll_interval_seconds=settings.worker_poll_interval_seconds,
+        lease_seconds=settings.worker_lease_seconds,
+        heartbeat_interval_seconds=min(
+            30.0,
+            settings.worker_lease_seconds / 3,
+        ),
     )
     app.state.worker_thread = _WorkerThread(app.state.worker)
     app.state.worker_thread.start()
@@ -54,7 +60,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         worker: LocalWorker = app.state.worker
         thread: _WorkerThread = app.state.worker_thread
         worker.stop()
-        thread.join(timeout=10.0)
+        thread.join(timeout=settings.worker_shutdown_timeout_seconds)
+        if thread.is_alive():
+            logger.error(
+                "worker did not stop within %.1f seconds",
+                settings.worker_shutdown_timeout_seconds,
+            )
         logger.info("web app stopped")
 
 
@@ -103,6 +114,19 @@ def create_app(
 
 def _register_exception_handlers(app: FastAPI) -> None:
     """Surface uncaught errors as the unified error envelope."""
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation(
+        _request: Request,
+        _exc: RequestValidationError,
+    ) -> JSONResponse:
+        body = ErrorEnvelope(
+            error=ErrorBody(
+                code="INVALID_INPUT",
+                message="request validation failed",
+            ),
+        )
+        return JSONResponse(status_code=422, content=body.model_dump(mode="json"))
 
     @app.exception_handler(Exception)
     async def _unhandled(_request: Request, exc: Exception) -> JSONResponse:

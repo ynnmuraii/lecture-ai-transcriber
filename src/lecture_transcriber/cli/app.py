@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 from uuid import UUID
 
 import typer
+from pydantic import ValidationError
 
 from lecture_transcriber.bootstrap import ApplicationContainer
 from lecture_transcriber.infrastructure.config import Settings
@@ -290,14 +291,19 @@ def serve(
     """Start the FastAPI app via uvicorn."""
     import uvicorn
 
-    settings = Settings()
+    base_settings = Settings()
+    try:
+        settings = Settings(
+            host=host or base_settings.host,
+            port=port or base_settings.port,
+        )
+    except ValidationError as exc:
+        _err("INVALID_SETTINGS", str(exc))
     settings.ensure_directories()
-    cfg_host = host or settings.host
-    cfg_port = port or settings.port
     uvicorn.run(
         "lecture_transcriber.web.app:create_app",
-        host=cfg_host,
-        port=cfg_port,
+        host=settings.host,
+        port=settings.port,
         reload=reload,
         factory=True,
     )

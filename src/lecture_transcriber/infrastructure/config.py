@@ -9,9 +9,9 @@ between hosts without touching configuration.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,11 +36,30 @@ class Settings(BaseSettings):
     # to forbid network access at runtime (the web worker, the ASR engine).
     offline: bool = False
     host: str = "127.0.0.1"
+    allow_unsafe_network_bind: bool = False
     port: int = Field(default=8000, ge=1, le=65_535)
-    max_upload_bytes: int = Field(default=4 * 1024 * 1024 * 1024, ge=1)
-    worker_lease_seconds: int = Field(default=120, ge=1)
-    worker_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
+    max_upload_bytes: int = Field(
+        default=4 * 1024 * 1024 * 1024,
+        ge=1,
+        le=1024**4,
+    )
+    worker_lease_seconds: int = Field(default=120, ge=1, le=86_400)
+    worker_poll_interval_seconds: float = Field(default=1.0, gt=0.0, le=60.0)
+    worker_shutdown_timeout_seconds: float = Field(default=10.0, gt=0.0, le=300.0)
     log_level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = "INFO"
+
+    @model_validator(mode="after")
+    def _validate_network_bind(self) -> Self:
+        loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+        if (
+            self.host.strip().lower() not in loopback_hosts
+            and not self.allow_unsafe_network_bind
+        ):
+            raise ValueError(
+                "unsafe network bind requires "
+                "LECTURE_TRANSCRIBER_ALLOW_UNSAFE_NETWORK_BIND=true"
+            )
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property
