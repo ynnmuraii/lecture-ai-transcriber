@@ -7,10 +7,13 @@ from pathlib import Path
 from lecture_transcriber.infrastructure.config import Settings
 
 
-def test_settings_default_to_offline_local_storage(tmp_path: Path) -> None:
+def test_settings_default_to_local_storage(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path)
 
-    assert settings.offline is True
+    # The default is online so the first-run experience (download a model,
+    # transcribe) works without the user having to flip a flag. The CLI
+    # ``models download`` always goes online regardless of this setting.
+    assert settings.offline is False
     assert settings.database_path == tmp_path / "app.db"
     assert settings.media_dir == tmp_path / "media"
     assert settings.jobs_dir == tmp_path / "jobs"

@@ -30,7 +30,10 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("./data")
     model_dir_override: Path | None = None
-    offline: bool = True
+    # ``offline`` defaults to False so the first-run experience (download a
+    # model, transcribe) works out of the box. Set LECTURE_TRANSCRIBER_OFFLINE=true
+    # to forbid network access at runtime (the web worker, the ASR engine).
+    offline: bool = False
     host: str = "127.0.0.1"
     port: int = 8000
     max_upload_bytes: int = 4 * 1024 * 1024 * 1024

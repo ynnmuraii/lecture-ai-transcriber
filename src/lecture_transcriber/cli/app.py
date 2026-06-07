@@ -103,9 +103,30 @@ def models_list(json_output: bool = typer.Option(False, "--json")) -> None:
 
 @models_app.command("download")
 def models_download(model: str) -> None:
+    """Download a faster-whisper model into the local cache.
+
+    The command always goes online — it is the *only* place in the codebase
+    that is allowed to make network requests for the model itself, so the
+    ``offline`` setting cannot block it.
+    """
     container = _container()
-    cached = container.model_cache.download(model)
-    typer.echo(f"downloaded: {cached.name}")
+    settings = container.settings
+    settings.ensure_directories()
+    try:
+        from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+    except Exception as exc:  # pragma: no cover - import guard
+        _err("ASR_IMPORT_FAILED", f"failed to import faster_whisper: {exc}")
+    typer.echo(f"downloading {model} into {settings.model_dir} …")
+    # local_files_only=False forces a download even when the host is in
+    # offline mode for transcription.
+    WhisperModel(
+        model,
+        device="cpu",
+        compute_type="int8",
+        download_root=str(settings.model_dir),
+        local_files_only=False,
+    )
+    typer.echo(f"downloaded: {model}")
 
 
 @app.command("import")
