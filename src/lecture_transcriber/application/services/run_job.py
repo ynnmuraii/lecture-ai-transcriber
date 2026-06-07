@@ -12,9 +12,10 @@ and refuses to publish any artifacts if the user asked to cancel.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from lecture_transcriber.application.services.export_transcript import (
@@ -26,13 +27,16 @@ from lecture_transcriber.domain.errors import (
     ExportFailed,
     JobCancelled,
     JobLeaseLost,
+    MediaProbeFailed,
     ModelLoadFailed,
 )
 from lecture_transcriber.domain.models import (
     EngineMetadata,
     JobEvent,
+    LanguageMetadata,
     Media,
     Transcript,
+    TranscriptionJob,
     TranscriptSegment,
     TranscriptWarning,
 )
@@ -186,6 +190,8 @@ class RunJobService:
             raise
         except JobCancelled:
             self._on_cancelled(job_id)
+        except MediaProbeFailed as exc:
+            self._fail_with(job_id, ErrorCode.MEDIA_PROBE_FAILED, str(exc))
         except ExportFailed as exc:
             self._fail_with(job_id, ErrorCode.EXPORT_FAILED, str(exc))
         except AsrFailed as exc:
@@ -208,12 +214,15 @@ class RunJobService:
         # file at execution time (e.g. a removed file should fail loudly).
         self._raise_if_stopped(job_id, worker_id, lease_lost)
         path = self._file_store.resolve_media(media.stored_path)
+        self._verify_media_integrity(path, media)
         try:
             result = self._probe.probe(path)
+        except MediaProbeFailed:
+            raise
         except Exception as exc:
-            raise AsrFailed(f"probe failed: {exc}") from exc
+            raise MediaProbeFailed(f"probe failed: {exc}") from exc
         if result.duration_seconds <= 0:
-            raise AsrFailed("media has no decodable duration")
+            raise MediaProbeFailed("media has no positive decodable duration")
         self._advance(
             job_id,
             JobStatus.LOADING_MODEL,
@@ -232,13 +241,13 @@ class RunJobService:
         self,
         job_id: UUID,
         media: Media,
-        job: Any,
+        job: TranscriptionJob,
         worker_id: str,
         lease_lost: Callable[[], bool],
     ) -> tuple[
         tuple[TranscriptSegment, ...],
         EngineMetadata,
-        Any,
+        LanguageMetadata,
         float | None,
     ]:
         self._raise_if_stopped(job_id, worker_id, lease_lost)
@@ -335,6 +344,22 @@ class RunJobService:
         job = self._job_repo.get(job_id)
         return job.progress if job else 0
 
+    def _verify_media_integrity(self, path: Path, media: Media) -> None:
+        try:
+            stat = path.stat()
+            if stat.st_size != media.size_bytes:
+                raise MediaProbeFailed("stored media size does not match imported metadata")
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except MediaProbeFailed:
+            raise
+        except OSError as exc:
+            raise MediaProbeFailed(f"stored media is unavailable: {exc}") from exc
+        if digest.hexdigest() != media.sha256:
+            raise MediaProbeFailed("stored media checksum does not match imported metadata")
+
     def _advance(
         self,
         job_id: UUID,
@@ -381,12 +406,13 @@ class RunJobService:
         # mark_failed writes the terminal state, error code, error message and
         # completed_at atomically. save_progress afterwards is a no-op for
         # the row state but keeps the stage_message consistent.
-        self._job_repo.mark_failed(job_id, code.value, _redact(message))
+        safe_message = _redact(message)
+        self._job_repo.mark_failed(job_id, code.value, safe_message)
         self._job_repo.save_progress(
             job_id,
             JobStatus.FAILED,
             self._last_progress(job_id),
-            message,
+            safe_message,
         )
         self._event_repo.append(
             JobEvent(
@@ -394,7 +420,7 @@ class RunJobService:
                 job_id=job_id,
                 occurred_at=_utcnow(self._clock),
                 status=JobStatus.FAILED,
-                message=message,
+                message=safe_message,
                 error_code=code.value,
             )
         )

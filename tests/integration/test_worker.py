@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -80,15 +81,18 @@ def stack(data_dir: Path) -> Iterator[dict[str, object]]:
         tmp_dir=data_dir / "tmp",
     )
     exporter = ExportTranscriptService(file_store, artifact_repo)
+    source = data_dir / "dummy"
+    source_bytes = b"worker media fixture"
+    source.write_bytes(source_bytes)
     media = Media(
         id=uuid4(),
         original_name="lecture.mp4",
         stored_path="dummy",
         media_type=MediaType.VIDEO,
         mime_type="video/mp4",
-        size_bytes=1024,
+        size_bytes=len(source_bytes),
         duration_seconds=10.0,
-        sha256="a" * 64,
+        sha256=hashlib.sha256(source_bytes).hexdigest(),
         created_at=datetime(2026, 6, 7, tzinfo=UTC),
     )
     media_repo.add(media)

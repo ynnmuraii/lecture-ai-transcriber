@@ -15,6 +15,23 @@ from lecture_transcriber.domain.errors import MediaProbeFailed
 from lecture_transcriber.domain.ports import MediaProbe, MediaProbeResult
 
 
+def _duration_seconds(container: object, stream: object) -> float:
+    container_duration = getattr(container, "duration", None)
+    if container_duration is not None:
+        duration = float(container_duration) / 1_000_000.0
+    else:
+        stream_duration = getattr(stream, "duration", None)
+        time_base = getattr(stream, "time_base", None)
+        duration = (
+            float(stream_duration) * float(time_base)
+            if stream_duration is not None and time_base is not None
+            else 0.0
+        )
+    if duration <= 0:
+        raise MediaProbeFailed("media has no positive decodable duration")
+    return duration
+
+
 class PyAVMediaProbe(MediaProbe):
     def probe(self, path: Path) -> MediaProbeResult:
         try:
@@ -38,10 +55,7 @@ class PyAVMediaProbe(MediaProbe):
                 if channels is not None:
                     channels = int(channels) or None
 
-                if container.duration is not None:
-                    duration = float(container.duration) / 1_000_000.0
-                else:
-                    duration = float(stream.duration or 0.0) or 0.0
+                duration = _duration_seconds(container, stream)
 
                 media_type = "video" if any(
                     s.type == "video" for s in container.streams

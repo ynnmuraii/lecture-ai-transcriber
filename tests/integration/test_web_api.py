@@ -55,6 +55,7 @@ from lecture_transcriber.infrastructure.repositories import (
 from lecture_transcriber.infrastructure.worker import LocalWorker
 from lecture_transcriber.transcription.profiles import ProfileSelector
 from lecture_transcriber.web.app import create_app
+from lecture_transcriber.web.routes import media as media_routes
 from tests.contract.fakes import (
     FakeASREngine,
     InMemoryModelCache,
@@ -237,6 +238,36 @@ def test_upload_streams_into_media_store(client: TestClient, tmp_path: Path) -> 
     assert "id" in body["media"]
     assert body["media"]["original_name"] == "a.wav"
     assert body["media"]["size_bytes"] > 0
+
+
+def test_upload_runs_blocking_import_in_threadpool(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wav = tmp_path / "threaded.wav"
+    _silence_wav(wav)
+    calls = 0
+
+    async def recording_run_in_threadpool(func, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        media_routes,
+        "run_in_threadpool",
+        recording_run_in_threadpool,
+        raising=False,
+    )
+
+    response = client.post(
+        "/api/media",
+        files={"file": ("threaded.wav", wav.open("rb"), "audio/wav")},
+    )
+
+    assert response.status_code == 201
+    assert calls == 1
 
 
 def test_create_job_for_missing_media_returns_404(client: TestClient) -> None:

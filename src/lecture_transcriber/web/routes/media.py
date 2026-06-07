@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from lecture_transcriber.application.services.import_media import ImportMediaService
 from lecture_transcriber.bootstrap import ApplicationContainer
@@ -39,7 +40,12 @@ async def upload_media(
         return _envelope(400, "INVALID_INPUT", "uploaded file has no name")
     max_bytes = container.settings.max_upload_bytes
     try:
-        media = importer.import_stream(file.file, file.filename, max_bytes=max_bytes)
+        media = await run_in_threadpool(
+            importer.import_stream,
+            file.file,
+            file.filename,
+            max_bytes,
+        )
     except UnsupportedFormat as exc:
         return _envelope(415, "UNSUPPORTED_FORMAT", str(exc))
     except MediaTooLarge as exc:

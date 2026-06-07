@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from lecture_transcriber.application.services.export_transcript import (
 from lecture_transcriber.application.services.get_job import GetJobService
 from lecture_transcriber.application.services.run_job import RunJobService
 from lecture_transcriber.domain.enums import ErrorCode, JobStatus
-from lecture_transcriber.domain.errors import AsrFailed, JobLeaseLost
+from lecture_transcriber.domain.errors import AsrFailed, JobLeaseLost, MediaProbeFailed
 from lecture_transcriber.domain.models import (
     HardwareFacts,
     Media,
@@ -74,6 +75,11 @@ class _BoomEngine(ASREngine):
         raise AsrFailed("engine boom")
 
 
+class _FailingProbe(MediaProbe):
+    def probe(self, path: Path) -> MediaProbeResult:
+        raise MediaProbeFailed("cannot decode audio")
+
+
 def _settings(data_dir: Path) -> Settings:
     return Settings(data_dir=data_dir)
 
@@ -95,6 +101,9 @@ def stack(data_dir: Path) -> Iterator[dict[str, object]]:
         tmp_dir=data_dir / "tmp",
     )
     exporter = ExportTranscriptService(file_store, artifact_repo)
+    source = data_dir / "dummy"
+    source_bytes = b"valid media fixture"
+    source.write_bytes(source_bytes)
 
     media = Media(
         id=uuid4(),
@@ -102,9 +111,9 @@ def stack(data_dir: Path) -> Iterator[dict[str, object]]:
         stored_path="dummy",
         media_type=MediaType.VIDEO,
         mime_type="video/mp4",
-        size_bytes=1024,
+        size_bytes=len(source_bytes),
         duration_seconds=10.0,
-        sha256="a" * 64,
+        sha256=hashlib.sha256(source_bytes).hexdigest(),
         created_at=datetime(2026, 6, 7, tzinfo=UTC),
     )
     media_repo.add(media)
@@ -148,6 +157,7 @@ def _build_run(
     stack: dict[str, object],
     *,
     engine: ASREngine,
+    probe: MediaProbe | None = None,
 ) -> RunJobService:
     return RunJobService(
         job_repo=stack["job_repo"],
@@ -155,7 +165,7 @@ def _build_run(
         artifact_repo=stack["artifact_repo"],
         media_repo=stack["media_repo"],
         file_store=stack["file_store"],
-        probe=_StaticProbe(duration=10.0),
+        probe=probe or _StaticProbe(duration=10.0),
         engine=engine,
         exporter=stack["exporter"],
         clock=SystemClock(),
@@ -232,6 +242,36 @@ def test_asr_failure_records_stable_error_code(stack) -> None:
     assert job.status == JobStatus.FAILED
     assert job.error_code == ErrorCode.ASR_FAILED.value
     assert "engine boom" in (job.error_message or "")
+
+
+def test_probe_failure_uses_media_probe_error_code(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(media.id, TranscriptionOptions())
+    run = _build_run(stack, engine=FakeASREngine(), probe=_FailingProbe())
+
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == ErrorCode.MEDIA_PROBE_FAILED.value
+
+
+def test_changed_media_is_rejected_before_asr(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(media.id, TranscriptionOptions())
+    path = stack["file_store"].resolve_media(media.stored_path)  # type: ignore[attr-defined]
+    path.write_bytes(b"tampered")
+    engine = FakeASREngine()
+    run = _build_run(stack, engine=engine)
+
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == ErrorCode.MEDIA_PROBE_FAILED.value
+    assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
 
 
 def test_cancellation_before_export_marks_job_cancelled(stack) -> None:

@@ -27,8 +27,13 @@ from lecture_transcriber.domain.ports import (
 
 
 class _Store(FileStore):
-    def __init__(self, raise_too_large: bool = False) -> None:
+    def __init__(
+        self,
+        raise_too_large: bool = False,
+        physical_path: Path | None = None,
+    ) -> None:
         self.raise_too_large = raise_too_large
+        self.physical_path = physical_path or Path("x")
         self.imports: list[tuple[bytes, str]] = []
 
     def import_media(self, source, original_name: str, max_bytes: int) -> StoredMedia:
@@ -48,7 +53,7 @@ class _Store(FileStore):
                 sha256="0" * 64,
                 created_at=datetime.now(UTC),
             ),
-            physical_path=Path("x"),
+            physical_path=self.physical_path,
         )
 
     def resolve_media(self, relative_path: str) -> Path:
@@ -137,3 +142,46 @@ def test_import_probe_failure_does_not_persist_media() -> None:
         service.import_stream(BytesIO(b"x"), "lecture.mp3", 1024)
 
     assert repo.added == []
+
+
+def test_import_probe_failure_deletes_physical_file(tmp_path: Path) -> None:
+    media_dir = tmp_path / "media" / "item"
+    media_dir.mkdir(parents=True)
+    source = media_dir / "source.bin"
+    source.write_bytes(b"bad media")
+    store = _Store(physical_path=source)
+    service = ImportMediaService(store, _Probe(MediaProbeFailed("nope")), _Repo())
+
+    with pytest.raises(MediaProbeFailed):
+        service.import_stream(BytesIO(b"x"), "lecture.mp3", 1024)
+
+    assert not source.exists()
+    assert not media_dir.exists()
+
+
+def test_import_rejects_zero_duration_probe_and_deletes_file(tmp_path: Path) -> None:
+    media_dir = tmp_path / "media" / "item"
+    media_dir.mkdir(parents=True)
+    source = media_dir / "source.bin"
+    source.write_bytes(b"empty media")
+    store = _Store(physical_path=source)
+    repo = _Repo()
+    service = ImportMediaService(
+        store,
+        _Probe(
+            MediaProbeResult(
+                media_type="audio",
+                duration_seconds=0.0,
+                audio_codec="x",
+                audio_sample_rate=None,
+                audio_channels=None,
+            )
+        ),
+        repo,
+    )
+
+    with pytest.raises(MediaProbeFailed, match="duration"):
+        service.import_stream(BytesIO(b"x"), "lecture.mp3", 1024)
+
+    assert repo.added == []
+    assert not source.exists()

@@ -85,25 +85,30 @@ class ImportMediaService:
 
         try:
             result: MediaProbeResult = self._probe.probe(stored.physical_path)
-        except MediaProbeFailed:
+            if result.duration_seconds <= 0:
+                raise MediaProbeFailed(
+                    f"file {stored.media.original_name} has no positive duration"
+                )
+            media = Media(
+                id=stored.media.id,
+                original_name=stored.media.original_name,
+                stored_path=stored.media.stored_path,
+                media_type=MediaType(result.media_type),
+                mime_type=stored.media.mime_type,
+                size_bytes=stored.media.size_bytes,
+                duration_seconds=result.duration_seconds,
+                sha256=stored.media.sha256,
+                created_at=stored.media.created_at,
+            )
+            self._media_repo.add(media)
+        except Exception:
             self._delete_physical(stored.physical_path)
             raise
-
-        media = Media(
-            id=stored.media.id,
-            original_name=stored.media.original_name,
-            stored_path=stored.media.stored_path,
-            media_type=MediaType(result.media_type),
-            mime_type=stored.media.mime_type,
-            size_bytes=stored.media.size_bytes,
-            duration_seconds=result.duration_seconds,
-            sha256=stored.media.sha256,
-            created_at=stored.media.created_at,
-        )
-        self._media_repo.add(media)
         return media
 
     def _delete_physical(self, path: Path) -> None:
         parent = path.parent
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             parent.rmdir()
