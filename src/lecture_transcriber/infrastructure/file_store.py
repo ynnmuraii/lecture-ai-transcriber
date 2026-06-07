@@ -11,6 +11,7 @@ import hashlib
 import os
 import shutil
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Final
@@ -105,37 +106,101 @@ class LocalFileStore(FileStore):
         filename: str,
         content: bytes,
     ) -> StoredArtifact:
-        if "/" in filename or "\\" in filename or filename in {".", ".."}:
-            raise ValueError("filename must not contain path separators")
-        if not filename:
-            raise ValueError("filename must not be empty")
+        fmt = _artifact_format(filename)
 
         job_dir = self._jobs_dir / str(job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
         target = job_dir / filename
         tmp_target = self._tmp_dir / f"{job_id}-{filename}.part"
 
-        with tmp_target.open("wb") as out:
-            out.write(content)
-            out.flush()
-            os.fsync(out.fileno())
-        os.replace(tmp_target, target)
+        try:
+            _write_synced(tmp_target, content)
+            os.replace(tmp_target, target)
+        except Exception:
+            tmp_target.unlink(missing_ok=True)
+            if not any(job_dir.iterdir()):
+                job_dir.rmdir()
+            raise
+        return _stored_artifact(self._data_dir, job_id, target, fmt, content)
 
-        sha = hashlib.sha256(content).hexdigest()
-        rel = str(_to_relative(self._data_dir, target))
-        fmt = filename.rsplit(".", 1)[-1]
-        if fmt not in ("json", "txt", "srt", "vtt"):
-            raise ValueError(f"artifact extension {fmt!r} is not supported")
-        artifact = Artifact(
-            id=uuid.uuid4(),
-            job_id=job_id,
-            format=fmt,  # type: ignore[arg-type]
-            relative_path=rel,
-            size_bytes=len(content),
-            sha256=sha,
-            created_at=datetime.now(UTC),
+    def write_artifacts_atomic(
+        self,
+        job_id: UUID,
+        contents: Mapping[str, bytes],
+    ) -> tuple[StoredArtifact, ...]:
+        if not contents:
+            raise ValueError("artifact set must not be empty")
+        validated = tuple(
+            (filename, content, _artifact_format(filename))
+            for filename, content in contents.items()
         )
-        return StoredArtifact(artifact=artifact, physical_path=target)
+        job_dir = self._jobs_dir / str(job_id)
+        if job_dir.exists():
+            raise FileExistsError(f"artifact directory already exists for job {job_id}")
+        staging = self._tmp_dir / f"{job_id}-{uuid.uuid4().hex}.artifacts.part"
+        staging.mkdir()
+        stored: list[StoredArtifact] = []
+        try:
+            for filename, content, fmt in validated:
+                staging_target = staging / filename
+                _write_synced(staging_target, content)
+                final_target = job_dir / filename
+                stored.append(
+                    _stored_artifact(
+                        self._data_dir,
+                        job_id,
+                        final_target,
+                        fmt,
+                        content,
+                    )
+                )
+            os.replace(staging, job_dir)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return tuple(stored)
+
+    def delete_job_artifacts(self, job_id: UUID) -> None:
+        shutil.rmtree(self._jobs_dir / str(job_id), ignore_errors=True)
+        for staging in self._tmp_dir.glob(f"{job_id}-*.artifacts.part"):
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _artifact_format(filename: str) -> str:
+    if not filename:
+        raise ValueError("filename must not be empty")
+    if "/" in filename or "\\" in filename or filename in {".", ".."}:
+        raise ValueError("filename must not contain path separators")
+    fmt = filename.rsplit(".", 1)[-1]
+    if fmt not in ("json", "txt", "srt", "vtt"):
+        raise ValueError(f"artifact extension {fmt!r} is not supported")
+    return fmt
+
+
+def _write_synced(path: Path, content: bytes) -> None:
+    with path.open("wb") as out:
+        out.write(content)
+        out.flush()
+        os.fsync(out.fileno())
+
+
+def _stored_artifact(
+    data_dir: Path,
+    job_id: UUID,
+    target: Path,
+    fmt: str,
+    content: bytes,
+) -> StoredArtifact:
+    artifact = Artifact(
+        id=uuid.uuid4(),
+        job_id=job_id,
+        format=fmt,  # type: ignore[arg-type]
+        relative_path=str(_to_relative(data_dir, target)),
+        size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        created_at=datetime.now(UTC),
+    )
+    return StoredArtifact(artifact=artifact, physical_path=target)
 
 
 def _to_relative(root: Path, target: Path) -> PurePosixPath:

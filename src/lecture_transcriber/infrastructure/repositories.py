@@ -228,6 +228,59 @@ class SqlJobRepository(JobRepository):
             _copy_job_to_record(job, record)
             session.commit()
 
+    def fail_with_event(
+        self,
+        job_id: UUID,
+        error_code: str,
+        error_message: str,
+        event: JobEvent,
+    ) -> None:
+        if (
+            event.job_id != job_id
+            or event.status != JobStatus.FAILED
+            or event.error_code != error_code
+        ):
+            raise ValueError("failure event does not match failed job")
+        with self._session_factory() as session:
+            record = session.get(JobRecord, str(job_id))
+            if record is None:
+                return
+            job = _job_from_record(record)
+            if job.is_terminal():
+                return
+            job.mark_failed(error_code, error_message)
+            _release_terminal_lease(job)
+            _copy_job_to_record(job, record)
+            session.add(_event_to_record(event))
+            session.commit()
+
+    def complete_with_artifacts(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        artifacts: tuple[Artifact, ...],
+        event: JobEvent,
+    ) -> None:
+        if status not in {
+            JobStatus.COMPLETED,
+            JobStatus.COMPLETED_WITH_WARNINGS,
+        }:
+            raise ValueError("completion status must be terminal success")
+        if event.job_id != job_id or event.status != status:
+            raise ValueError("completion event does not match job")
+        if any(artifact.job_id != job_id for artifact in artifacts):
+            raise ValueError("all artifacts must belong to the completed job")
+        with self._session_factory() as session:
+            record = session.get(JobRecord, str(job_id))
+            if record is None:
+                raise KeyError(f"job {job_id} does not exist")
+            job = _job_from_record(record)
+            _apply_progress(job, status, 100, None)
+            _copy_job_to_record(job, record)
+            session.add_all(_artifact_to_record(artifact) for artifact in artifacts)
+            session.add(_event_to_record(event))
+            session.commit()
+
     def request_cancel(self, job_id: UUID) -> bool:
         with self._session_factory() as session:
             record = session.get(JobRecord, str(job_id), with_for_update=True)

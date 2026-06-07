@@ -135,9 +135,8 @@ def test_export_service_writes_atomic_artifact(tmp_path: Path) -> None:
         jobs_dir=tmp_path / "jobs",
         tmp_dir=tmp_path / "tmp",
     )
-    from tests.contract.fakes import InMemoryArtifactRepository
     job_id = uuid4()
-    service = ExportTranscriptService(store, InMemoryArtifactRepository())
+    service = ExportTranscriptService(store)
 
     stored = service.export(job_id, "txt", _transcript())
     assert stored.artifact.format == "txt"

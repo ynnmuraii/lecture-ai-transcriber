@@ -63,3 +63,49 @@ def test_artifact_write_is_atomic_and_under_jobs_dir(data_dir: Path) -> None:
     # Reject path-traversal filenames.
     with pytest.raises(ValueError):
         store.write_artifact_atomic(job_id, "../escape.json", b"x")
+
+
+def test_unsupported_artifact_format_is_rejected_before_write(
+    data_dir: Path,
+) -> None:
+    from uuid import uuid4
+
+    store = _store(data_dir)
+    job_id = uuid4()
+
+    with pytest.raises(ValueError, match="not supported"):
+        store.write_artifact_atomic(job_id, "transcript.exe", b"x")
+
+    assert not (data_dir / "jobs" / str(job_id)).exists()
+
+
+def test_atomic_artifact_set_cleans_staging_when_publish_fails(
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import uuid4
+
+    store = _store(data_dir)
+    job_id = uuid4()
+
+    def fail_replace(source: object, target: object) -> None:
+        raise OSError(f"cannot publish {source} to {target}")
+
+    monkeypatch.setattr(
+        "lecture_transcriber.infrastructure.file_store.os.replace",
+        fail_replace,
+    )
+
+    with pytest.raises(OSError):
+        store.write_artifacts_atomic(
+            job_id,
+            {
+                "transcript.json": b"{}",
+                "transcript.txt": b"text",
+                "transcript.srt": b"srt",
+                "transcript.vtt": b"vtt",
+            },
+        )
+
+    assert not (data_dir / "jobs" / str(job_id)).exists()
+    assert list((data_dir / "tmp").iterdir()) == []

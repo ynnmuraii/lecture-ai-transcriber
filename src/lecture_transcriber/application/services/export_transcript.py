@@ -14,7 +14,6 @@ from lecture_transcriber.application.exporters import to_json, to_srt, to_txt, t
 from lecture_transcriber.domain.errors import ExportFailed
 from lecture_transcriber.domain.models import Transcript
 from lecture_transcriber.domain.ports import (
-    ArtifactRepository,
     FileStore,
     StoredArtifact,
 )
@@ -31,10 +30,8 @@ class ExportTranscriptService:
     def __init__(
         self,
         file_store: FileStore,
-        artifact_repo: ArtifactRepository,
     ) -> None:
         self._file_store = file_store
-        self._artifact_repo = artifact_repo
 
     def export(self, job_id: UUID, fmt: str, transcript: Transcript) -> StoredArtifact:
         if fmt not in _FORMATTERS:
@@ -48,6 +45,19 @@ class ExportTranscriptService:
             job_id, f"transcript.{fmt}", content_bytes
         )
         return stored
+
+    def export_all(
+        self,
+        job_id: UUID,
+        transcript: Transcript,
+    ) -> tuple[StoredArtifact, ...]:
+        contents: dict[str, bytes] = {}
+        for fmt, formatter in _FORMATTERS.items():
+            content = formatter(transcript)
+            contents[f"transcript.{fmt}"] = (
+                content.encode("utf-8") if isinstance(content, str) else content
+            )
+        return self._file_store.write_artifacts_atomic(job_id, contents)
 
 
 __all__ = ["ExportTranscriptService"]

@@ -185,7 +185,7 @@ def test_offline_does_not_make_network_calls(
         exporter=__import__(
             "lecture_transcriber.application.services.export_transcript",
             fromlist=["ExportTranscriptService"],
-        ).ExportTranscriptService(file_store, SqlArtifactRepository(sf)),
+        ).ExportTranscriptService(file_store),
         create_job=__import__(
             "lecture_transcriber.application.services.create_job",
             fromlist=["CreateJobService"],
@@ -217,8 +217,6 @@ def test_offline_does_not_make_network_calls(
             fromlist=["RunJobService"],
         ).RunJobService(
             job_repo=SqlJobRepository(sf),
-            event_repo=SqlJobEventRepository(sf),
-            artifact_repo=SqlArtifactRepository(sf),
             media_repo=SqlMediaRepository(sf),
             file_store=file_store,
             probe=media_probe,
@@ -226,7 +224,7 @@ def test_offline_does_not_make_network_calls(
             exporter=__import__(
                 "lecture_transcriber.application.services.export_transcript",
                 fromlist=["ExportTranscriptService"],
-            ).ExportTranscriptService(file_store, SqlArtifactRepository(sf)),
+            ).ExportTranscriptService(file_store),
             clock=SystemClock(),
         ),
         session_factory=sf,

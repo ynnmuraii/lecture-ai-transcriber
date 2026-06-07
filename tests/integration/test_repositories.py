@@ -267,6 +267,102 @@ def test_duplicate_artifact_format_for_job_is_rejected(session_factory) -> None:
         repo.add(_make_artifact(job_id, "json"))
 
 
+def test_job_completion_publishes_state_event_and_artifacts_atomically(
+    session_factory,
+) -> None:
+    media_repo = SqlMediaRepository(session_factory)
+    job_repo = SqlJobRepository(session_factory)
+    artifact_repo = SqlArtifactRepository(session_factory)
+    event_repo = SqlJobEventRepository(session_factory)
+    media = _make_media()
+    media_repo.add(media)
+    job = TranscriptionJob(id=uuid4(), media_id=media.id)
+    job_repo.add(job)
+    job_repo.claim(job.id, "worker", lease_seconds=120)
+    job_repo.save_progress(job.id, JobStatus.LOADING_MODEL, 20, "loading")
+    job_repo.save_progress(job.id, JobStatus.TRANSCRIBING, 60, "transcribing")
+    job_repo.save_progress(job.id, JobStatus.VALIDATING, 92, "validating")
+    job_repo.save_progress(job.id, JobStatus.EXPORTING, 95, "exporting")
+    artifacts = tuple(
+        _make_artifact(job.id, fmt)
+        for fmt in ("json", "txt", "srt", "vtt")
+    )
+    completion_event = JobEvent(
+        id=uuid4(),
+        job_id=job.id,
+        occurred_at=datetime.now(UTC),
+        status=JobStatus.COMPLETED,
+        message=None,
+        error_code=None,
+    )
+
+    job_repo.complete_with_artifacts(
+        job.id,
+        JobStatus.COMPLETED,
+        artifacts,
+        completion_event,
+    )
+
+    completed = job_repo.get(job.id)
+    assert completed is not None
+    assert completed.status == JobStatus.COMPLETED
+    assert completed.worker_id is None
+    assert {item.format for item in artifact_repo.list_for_job(job.id)} == {
+        "json",
+        "txt",
+        "srt",
+        "vtt",
+    }
+    assert event_repo.list_for_job(job.id)[-1].status == JobStatus.COMPLETED
+
+
+def test_job_completion_rolls_back_state_when_artifact_insert_fails(
+    session_factory,
+) -> None:
+    media_repo = SqlMediaRepository(session_factory)
+    job_repo = SqlJobRepository(session_factory)
+    artifact_repo = SqlArtifactRepository(session_factory)
+    event_repo = SqlJobEventRepository(session_factory)
+    media = _make_media()
+    media_repo.add(media)
+    job = TranscriptionJob(id=uuid4(), media_id=media.id)
+    job_repo.add(job)
+    job_repo.claim(job.id, "worker", lease_seconds=120)
+    job_repo.save_progress(job.id, JobStatus.LOADING_MODEL, 20, "loading")
+    job_repo.save_progress(job.id, JobStatus.TRANSCRIBING, 60, "transcribing")
+    job_repo.save_progress(job.id, JobStatus.VALIDATING, 92, "validating")
+    job_repo.save_progress(job.id, JobStatus.EXPORTING, 95, "exporting")
+    duplicate_artifacts = (
+        _make_artifact(job.id, "json"),
+        _make_artifact(job.id, "json"),
+    )
+    completion_event = JobEvent(
+        id=uuid4(),
+        job_id=job.id,
+        occurred_at=datetime.now(UTC),
+        status=JobStatus.COMPLETED,
+        message=None,
+        error_code=None,
+    )
+
+    with pytest.raises(IntegrityError):
+        job_repo.complete_with_artifacts(
+            job.id,
+            JobStatus.COMPLETED,
+            duplicate_artifacts,
+            completion_event,
+        )
+
+    current = job_repo.get(job.id)
+    assert current is not None
+    assert current.status == JobStatus.EXPORTING
+    assert artifact_repo.list_for_job(job.id) == ()
+    assert all(
+        event.status != JobStatus.COMPLETED
+        for event in event_repo.list_for_job(job.id)
+    )
+
+
 def _make_artifact(job_id, fmt: str) -> Artifact:
     return Artifact(
         id=uuid4(),

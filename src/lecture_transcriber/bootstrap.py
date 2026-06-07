@@ -108,7 +108,7 @@ class ApplicationContainer:
         event_repo = SqlJobEventRepository(session_factory)
         artifact_repo = SqlArtifactRepository(session_factory)
         importer = ImportMediaService(file_store, media_probe, media_repo)
-        exporter = ExportTranscriptService(file_store, artifact_repo)
+        exporter = ExportTranscriptService(file_store)
         # Clock is real in production; tests inject their own.
         from lecture_transcriber.infrastructure.clock import SystemClock
 
@@ -132,8 +132,6 @@ class ApplicationContainer:
         asr_engine = asr_engine_factory(settings)
         run_job = RunJobService(
             job_repo=job_repo,
-            event_repo=event_repo,
-            artifact_repo=artifact_repo,
             media_repo=media_repo,
             file_store=file_store,
             probe=media_probe,

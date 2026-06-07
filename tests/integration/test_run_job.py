@@ -105,7 +105,7 @@ def stack(data_dir: Path) -> Iterator[dict[str, object]]:
         jobs_dir=data_dir / "jobs",
         tmp_dir=data_dir / "tmp",
     )
-    exporter = ExportTranscriptService(file_store, artifact_repo)
+    exporter = ExportTranscriptService(file_store)
     source = data_dir / "dummy"
     source_bytes = b"valid media fixture"
     source.write_bytes(source_bytes)
@@ -166,8 +166,6 @@ def _build_run(
 ) -> RunJobService:
     return RunJobService(
         job_repo=stack["job_repo"],
-        event_repo=stack["event_repo"],
-        artifact_repo=stack["artifact_repo"],
         media_repo=stack["media_repo"],
         file_store=stack["file_store"],
         probe=probe or _StaticProbe(duration=10.0),
@@ -340,6 +338,26 @@ def test_empty_transcription_fails_without_artifacts(stack) -> None:
     assert job.status == JobStatus.FAILED
     assert job.error_code == ErrorCode.ASR_FAILED.value
     assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
+
+
+def test_completion_database_failure_removes_all_exported_files(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(media.id, TranscriptionOptions())
+    job_repo = stack["job_repo"]
+
+    def fail_completion(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("database unavailable")
+
+    job_repo.complete_with_artifacts = fail_completion  # type: ignore[attr-defined]
+
+    _build_run(stack, engine=FakeASREngine()).run_job(summary.id)
+
+    job = job_repo.get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
+    settings: Settings = stack["settings"]  # type: ignore[assignment]
+    assert not (settings.jobs_dir / str(summary.id)).exists()
 
 
 def test_asr_failure_records_stable_error_code(stack) -> None:

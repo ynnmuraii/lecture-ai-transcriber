@@ -111,7 +111,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Settings]:
         "lecture_transcriber.infrastructure.model_cache.FilesystemModelCache",
         lambda model_dir: cache,
     )
-    exporter = ExportTranscriptService(file_store, artifact_repo)
+    exporter = ExportTranscriptService(file_store)
     importer = ImportMediaService(file_store, _StaticProbe(), media_repo)
     create = CreateJobService(
         media_repo=media_repo,
@@ -142,8 +142,6 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Settings]:
     )
     run = RunJobService(
         job_repo=job_repo,
-        event_repo=event_repo,
-        artifact_repo=artifact_repo,
         media_repo=media_repo,
         file_store=file_store,
         probe=_StaticProbe(),

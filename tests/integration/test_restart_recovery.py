@@ -77,7 +77,7 @@ def stack(data_dir: Path) -> Iterator[dict[str, object]]:
         jobs_dir=data_dir / "jobs",
         tmp_dir=data_dir / "tmp",
     )
-    exporter = ExportTranscriptService(file_store, artifact_repo)
+    exporter = ExportTranscriptService(file_store)
     source = data_dir / "dummy"
     source_bytes = b"recovery media fixture"
     source.write_bytes(source_bytes)
@@ -127,8 +127,6 @@ def _create(stack: dict[str, object]) -> CreateJobService:
 def _build_worker(stack: dict[str, object]) -> LocalWorker:
     runner = RunJobService(
         job_repo=stack["job_repo"],  # type: ignore[arg-type]
-        event_repo=stack["event_repo"],  # type: ignore[arg-type]
-        artifact_repo=stack["artifact_repo"],  # type: ignore[arg-type]
         media_repo=stack["media_repo"],  # type: ignore[arg-type]
         file_store=stack["file_store"],  # type: ignore[arg-type]
         probe=_StaticProbe(),

@@ -102,7 +102,7 @@ def _build_container(
     )
     probe = _StaticProbe()
     cache = InMemoryModelCache(available=("small", "medium"))
-    exporter = ExportTranscriptService(file_store, artifact_repo)
+    exporter = ExportTranscriptService(file_store)
     importer = ImportMediaService(file_store, probe, media_repo)
     hardware = StaticHardwareDetector(
         HardwareFacts(
@@ -134,8 +134,6 @@ def _build_container(
     )
     run = RunJobService(
         job_repo=job_repo,
-        event_repo=event_repo,
-        artifact_repo=artifact_repo,
         media_repo=media_repo,
         file_store=file_store,
         probe=probe,

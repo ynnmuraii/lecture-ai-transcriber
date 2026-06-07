@@ -7,7 +7,7 @@ adapters live in :mod:`lecture_transcriber.infrastructure` and
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -85,6 +85,14 @@ class FileStore(Protocol):
         filename: str,
         content: bytes,
     ) -> StoredArtifact: ...
+
+    def write_artifacts_atomic(
+        self,
+        job_id: UUID,
+        contents: Mapping[str, bytes],
+    ) -> tuple[StoredArtifact, ...]: ...
+
+    def delete_job_artifacts(self, job_id: UUID) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +228,20 @@ class JobRepository(Protocol):
         job_id: UUID,
         error_code: str,
         error_message: str,
+    ) -> None: ...
+    def fail_with_event(
+        self,
+        job_id: UUID,
+        error_code: str,
+        error_message: str,
+        event: JobEvent,
+    ) -> None: ...
+    def complete_with_artifacts(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        artifacts: tuple[Artifact, ...],
+        event: JobEvent,
     ) -> None: ...
     def request_cancel(self, job_id: UUID) -> bool: ...
     def is_cancel_requested(self, job_id: UUID) -> bool: ...

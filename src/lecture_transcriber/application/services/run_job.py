@@ -40,15 +40,12 @@ from lecture_transcriber.domain.models import (
     TranscriptSegment,
 )
 from lecture_transcriber.domain.ports import (
-    ArtifactRepository,
     ASREngine,
     Clock,
     FileStore,
-    JobEventRepository,
     JobRepository,
     MediaProbe,
     MediaRepository,
-    StoredArtifact,
 )
 from lecture_transcriber.transcription.validator import (
     ValidationResult,
@@ -83,8 +80,6 @@ class RunJobService:
         self,
         *,
         job_repo: JobRepository,
-        event_repo: JobEventRepository,
-        artifact_repo: ArtifactRepository,
         media_repo: MediaRepository,
         file_store: FileStore,
         probe: MediaProbe,
@@ -93,8 +88,6 @@ class RunJobService:
         clock: Clock,
     ) -> None:
         self._job_repo = job_repo
-        self._event_repo = event_repo
-        self._artifact_repo = artifact_repo
         self._media_repo = media_repo
         self._file_store = file_store
         self._probe = probe
@@ -342,16 +335,8 @@ class RunJobService:
             progress=95,
             message="writing artifacts",
         )
-        # Canonical JSON first, then the rest. If anything fails, the whole
-        # job fails and no artifact row is published.
-        formats: tuple[str, ...] = ("json", "txt", "srt", "vtt")
-        stored: list[StoredArtifact] = []
-        for fmt in formats:
-            self._raise_if_stopped(job_id, worker_id, lease_lost)
-            stored.append(self._exporter.export(job_id, fmt, transcript))
         self._raise_if_stopped(job_id, worker_id, lease_lost)
-        for s in stored:
-            self._artifact_repo.add(s.artifact)
+        stored = self._exporter.export_all(job_id, transcript)
         # Decide terminal status.
         has_warnings = bool(
             transcript.warnings
@@ -362,7 +347,25 @@ class RunJobService:
             if has_warnings
             else JobStatus.COMPLETED
         )
-        self._advance(job_id, terminal, progress=100, message=None)
+        completion_event = JobEvent(
+            id=uuid4(),
+            job_id=job_id,
+            occurred_at=_utcnow(self._clock),
+            status=terminal,
+            message=None,
+            error_code=None,
+        )
+        try:
+            self._raise_if_stopped(job_id, worker_id, lease_lost)
+            self._job_repo.complete_with_artifacts(
+                job_id,
+                terminal,
+                tuple(item.artifact for item in stored),
+                completion_event,
+            )
+        except Exception:
+            self._file_store.delete_job_artifacts(job_id)
+            raise
 
     # -------------------------------------------------------------- internals
 
@@ -395,21 +398,20 @@ class RunJobService:
         message: str | None,
     ) -> None:
         current = self._last_progress(job_id)
-        self._job_repo.save_progress(
+        event = JobEvent(
+            id=uuid4(),
+            job_id=job_id,
+            occurred_at=_utcnow(self._clock),
+            status=status,
+            message=message,
+            error_code=None,
+        )
+        self._job_repo.save_progress_with_event(
             job_id,
             status,
             max(current, progress),
             message,
-        )
-        self._event_repo.append(
-            JobEvent(
-                id=uuid4(),
-                job_id=job_id,
-                occurred_at=_utcnow(self._clock),
-                status=status,
-                message=message,
-                error_code=None,
-            )
+            event,
         )
 
     def _raise_if_stopped(
@@ -433,41 +435,37 @@ class RunJobService:
         # completed_at atomically. save_progress afterwards is a no-op for
         # the row state but keeps the stage_message consistent.
         safe_message = _redact(message)
-        self._job_repo.mark_failed(job_id, code.value, safe_message)
-        self._job_repo.save_progress(
-            job_id,
-            JobStatus.FAILED,
-            self._last_progress(job_id),
-            safe_message,
+        event = JobEvent(
+            id=uuid4(),
+            job_id=job_id,
+            occurred_at=_utcnow(self._clock),
+            status=JobStatus.FAILED,
+            message=safe_message,
+            error_code=code.value,
         )
-        self._event_repo.append(
-            JobEvent(
-                id=uuid4(),
-                job_id=job_id,
-                occurred_at=_utcnow(self._clock),
-                status=JobStatus.FAILED,
-                message=safe_message,
-                error_code=code.value,
-            )
+        self._job_repo.fail_with_event(
+            job_id,
+            code.value,
+            safe_message,
+            event,
         )
 
     def _on_cancelled(self, job_id: UUID) -> None:
         # Best-effort cleanup. Atomic exporters leave no .part files behind.
-        self._job_repo.save_progress(
+        event = JobEvent(
+            id=uuid4(),
+            job_id=job_id,
+            occurred_at=_utcnow(self._clock),
+            status=JobStatus.CANCELLED,
+            message="cancelled",
+            error_code=ErrorCode.CANCELLED.value,
+        )
+        self._job_repo.save_progress_with_event(
             job_id,
             JobStatus.CANCELLED,
             self._last_progress(job_id),
             "cancelled",
-        )
-        self._event_repo.append(
-            JobEvent(
-                id=uuid4(),
-                job_id=job_id,
-                occurred_at=_utcnow(self._clock),
-                status=JobStatus.CANCELLED,
-                message="cancelled",
-                error_code=ErrorCode.CANCELLED.value,
-            )
+            event,
         )
 
 

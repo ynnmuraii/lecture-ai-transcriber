@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -157,10 +157,15 @@ class InMemoryArtifactRepository(ArtifactRepository):
 class InMemoryJobRepository(JobRepository):
     """Single-worker lease manager kept honest by ``sqlite`` in real tests."""
 
-    def __init__(self, event_repo: JobEventRepository | None = None) -> None:
+    def __init__(
+        self,
+        event_repo: JobEventRepository | None = None,
+        artifact_repo: ArtifactRepository | None = None,
+    ) -> None:
         self._jobs: dict[UUID, TranscriptionJob] = {}
         self._leases: dict[UUID, tuple[str, datetime]] = {}
         self._event_repo = event_repo
+        self._artifact_repo = artifact_repo
 
     def add(self, job: TranscriptionJob) -> None:
         self._jobs[job.id] = job
@@ -247,6 +252,31 @@ class InMemoryJobRepository(JobRepository):
         job.mark_failed(error_code, error_message)
         job.worker_id = None
         job.lease_expires_at = None
+
+    def fail_with_event(
+        self,
+        job_id: UUID,
+        error_code: str,
+        error_message: str,
+        event: JobEvent,
+    ) -> None:
+        self.mark_failed(job_id, error_code, error_message)
+        if self._event_repo is not None:
+            self._event_repo.append(event)
+
+    def complete_with_artifacts(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        artifacts: tuple[Artifact, ...],
+        event: JobEvent,
+    ) -> None:
+        self.save_progress(job_id, status, 100, None)
+        if self._artifact_repo is not None:
+            for artifact in artifacts:
+                self._artifact_repo.add(artifact)
+        if self._event_repo is not None:
+            self._event_repo.append(event)
 
     def request_cancel(self, job_id: UUID) -> bool:
         job = self._jobs.get(job_id)
@@ -383,6 +413,22 @@ class InMemoryFileStore(FileStore):
             created_at=datetime.now(UTC),
         )
         return StoredArtifact(artifact=artifact, physical_path=Path(rel))
+
+    def write_artifacts_atomic(
+        self,
+        job_id: UUID,
+        contents: Mapping[str, bytes],
+    ) -> tuple[StoredArtifact, ...]:
+        return tuple(
+            self.write_artifact_atomic(job_id, filename, content)
+            for filename, content in contents.items()
+        )
+
+    def delete_job_artifacts(self, job_id: UUID) -> None:
+        prefix = f"{job_id}/"
+        for relative_path in tuple(self._artifacts):
+            if relative_path.startswith(prefix):
+                del self._artifacts[relative_path]
 
 
 class StaticMediaProbe(MediaProbe):
