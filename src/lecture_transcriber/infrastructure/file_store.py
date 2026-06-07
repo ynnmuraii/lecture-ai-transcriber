@@ -96,6 +96,9 @@ class LocalFileStore(FileStore):
     def resolve_media(self, relative_path: str) -> Path:
         return _safe_resolve(self._data_dir, relative_path)
 
+    def resolve_artifact(self, relative_path: str) -> Path:
+        return _safe_resolve(self._data_dir, relative_path)
+
     def write_artifact_atomic(
         self,
         job_id: UUID,

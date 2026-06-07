@@ -76,6 +76,8 @@ class FileStore(Protocol):
 
     def resolve_media(self, relative_path: str) -> Path: ...
 
+    def resolve_artifact(self, relative_path: str) -> Path: ...
+
     def write_artifact_atomic(
         self,
         job_id: UUID,
