@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from lecture_transcriber.infrastructure.config import Settings
 
 
@@ -35,3 +38,23 @@ def test_model_dir_respects_explicit_override(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path, model_dir_override=override)
 
     assert settings.model_dir == override
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("port", 0),
+        ("port", 65_536),
+        ("max_upload_bytes", 0),
+        ("worker_lease_seconds", 0),
+        ("worker_poll_interval_seconds", -0.1),
+        ("log_level", "LOUD"),
+    ],
+)
+def test_settings_reject_invalid_runtime_values(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(data_dir=tmp_path, **{field: value})

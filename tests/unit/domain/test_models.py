@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -18,7 +19,6 @@ from lecture_transcriber.domain.models import (
     EngineMetadata,
     HardwareFacts,
     HardwareProfile,
-    JobView,
     LanguageMetadata,
     Media,
     MediaType,
@@ -147,6 +147,21 @@ def test_options_reject_beam_size_out_of_range() -> None:
         TranscriptionOptions(beam_size=0)
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["condition_on_previous_text", "vad_enabled"],
+)
+def test_options_reject_string_booleans(field: str) -> None:
+    with pytest.raises(InvalidOptions, match=field):
+        TranscriptionOptions.from_jsonable({field: "false"})
+
+
+@pytest.mark.parametrize("temperature", [math.nan, math.inf, -math.inf])
+def test_options_reject_non_finite_temperatures(temperature: float) -> None:
+    with pytest.raises(ValueError, match="temperatures"):
+        TranscriptionOptions(temperatures=(temperature,))
+
+
 # ---------------------------------------------------------------------------
 # Hardware models
 # ---------------------------------------------------------------------------
@@ -169,6 +184,58 @@ def test_hardware_profile_must_have_valid_device() -> None:
             cpu_threads=4,
             batch_size=1,
             reason="test",
+        )
+
+
+def test_language_probability_must_be_finite_unit_interval() -> None:
+    for probability in (-0.1, 1.1, math.nan, math.inf):
+        with pytest.raises(ValueError, match="probability"):
+            LanguageMetadata(requested=None, detected="ru", probability=probability)
+
+
+def test_media_rejects_non_hex_digest() -> None:
+    with pytest.raises(ValueError, match="hex digest"):
+        Media(
+            id=uuid4(),
+            original_name="lecture.mp4",
+            stored_path="abc/lecture.mp4",
+            media_type=MediaType.VIDEO,
+            mime_type="video/mp4",
+            size_bytes=1024,
+            duration_seconds=10.0,
+            sha256="z" * 64,
+            created_at=datetime(2026, 6, 7, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_segment_rejects_non_finite_timestamps(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        TranscriptSegment(index=0, start=value, end=1.0, text="x")
+
+
+def test_transcript_rejects_non_finite_duration() -> None:
+    with pytest.raises(ValueError, match="source_duration_seconds"):
+        Transcript(
+            schema_version="1.0",
+            job_id=uuid4(),
+            media=_media(),
+            engine=EngineMetadata(
+                name="faster-whisper",
+                version="1.2.0",
+                model="small",
+                device="cpu",
+                compute_type="int8",
+            ),
+            language=LanguageMetadata(
+                requested=None,
+                detected="ru",
+                probability=0.9,
+            ),
+            segments=(),
+            warnings=(),
+            source_duration_seconds=math.nan,
+            vad_duration_seconds=None,
         )
 
 
@@ -230,21 +297,6 @@ def test_canonical_json_preserves_verbatim_text() -> None:
     )
     data = json.loads(transcript.canonical_json())
     assert data["segments"][0]["text"] == "  спасибо за просмотр  "
-
-
-# ---------------------------------------------------------------------------
-# JobView
-# ---------------------------------------------------------------------------
-
-
-def test_job_view_is_a_stable_projection() -> None:
-    job = _queued_job()
-    job.update_progress(30, message="probing")
-    view = JobView.from_job(job)
-    assert view.id == job.id
-    assert view.status == JobStatus.QUEUED
-    assert view.progress == 30
-    assert view.stage_message == "probing"
 
 
 # ---------------------------------------------------------------------------

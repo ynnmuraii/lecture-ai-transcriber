@@ -5,7 +5,7 @@ class DomainError(Exception):
     """Base class for predictable, user-facing domain errors.
 
     These are the only exceptions that should ever propagate to the web/CLI
-    boundaries. Anything else is wrapped in :class:`InternalError`.
+    boundaries.
     """
 
 
@@ -55,7 +55,3 @@ class JobLeaseLost(DomainError):
 
 class InvalidOptions(DomainError):
     """Raised when application options fail validation before job creation."""
-
-
-class InternalError(DomainError):
-    """Wraps unexpected exceptions so they never leak stack traces to the UI."""

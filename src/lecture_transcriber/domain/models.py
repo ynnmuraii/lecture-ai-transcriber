@@ -8,7 +8,9 @@ the entities through repository ports and pass them back unchanged.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, replace
+import math
+import string
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -40,6 +42,28 @@ def _require_in_range(name: str, value: int, *, low: int, high: int) -> None:
         raise ValueError(f"{name} must be in [{low}, {high}], got {value!r}")
 
 
+def _require_finite(name: str, value: float) -> None:
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+
+
+def _require_optional_finite(name: str, value: float | None) -> None:
+    if value is not None:
+        _require_finite(name, value)
+
+
+def _require_sha256(value: str) -> None:
+    if len(value) != 64 or any(char not in string.hexdigits for char in value):
+        raise ValueError("sha256 must be a 64-character hex digest")
+
+
+def _parse_bool(data: dict[str, Any], field_name: str, default: bool) -> bool:
+    value = data.get(field_name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a boolean")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Immutable value objects
 # ---------------------------------------------------------------------------
@@ -63,10 +87,10 @@ class Media:
         if not self.original_name:
             raise ValueError("original_name must not be empty")
         _require_non_negative_int("size_bytes", self.size_bytes)
+        _require_finite("duration_seconds", self.duration_seconds)
         if self.duration_seconds < 0:
             raise ValueError("duration_seconds must be non-negative")
-        if len(self.sha256) != 64:
-            raise ValueError("sha256 must be a 64-character hex digest")
+        _require_sha256(self.sha256)
 
 
 @dataclass(frozen=True)
@@ -95,6 +119,7 @@ class TranscriptionOptions:
         if not self.temperatures:
             raise ValueError("temperatures must contain at least one value")
         for t in self.temperatures:
+            _require_finite("temperatures", t)
             if t < 0:
                 raise ValueError("temperatures must be non-negative")
         _require_in_range(
@@ -129,10 +154,12 @@ class TranscriptionOptions:
                 model_override=data.get("model_override"),
                 beam_size=int(data.get("beam_size", 5)),
                 temperatures=tuple(data.get("temperatures") or (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)),
-                condition_on_previous_text=bool(
-                    data.get("condition_on_previous_text", True)
+                condition_on_previous_text=_parse_bool(
+                    data,
+                    "condition_on_previous_text",
+                    True,
                 ),
-                vad_enabled=bool(data.get("vad_enabled", True)),
+                vad_enabled=_parse_bool(data, "vad_enabled", True),
                 vad_min_silence_ms=int(data.get("vad_min_silence_ms", 500)),
                 vad_speech_pad_ms=int(data.get("vad_speech_pad_ms", 200)),
                 hotwords=data.get("hotwords"),
@@ -154,7 +181,7 @@ class HardwareFacts:
 
     def __post_init__(self) -> None:
         _require_non_negative_int("ram_bytes", self.ram_bytes)
-        _require_non_negative_int("cpu_count", self.cpu_count)
+        _require_in_range("cpu_count", self.cpu_count, low=1, high=65_536)
         if self.vram_bytes is not None and self.vram_bytes < 0:
             raise ValueError("vram_bytes must be non-negative when provided")
 
@@ -190,6 +217,16 @@ class EngineMetadata:
     device: Literal["cpu", "cuda"]
     compute_type: str
 
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("name", self.name),
+            ("version", self.version),
+            ("model", self.model),
+            ("compute_type", self.compute_type),
+        ):
+            if not value:
+                raise ValueError(f"{name} must not be empty")
+
 
 @dataclass(frozen=True)
 class LanguageMetadata:
@@ -198,6 +235,13 @@ class LanguageMetadata:
     requested: str | None
     detected: str | None
     probability: float | None
+
+    def __post_init__(self) -> None:
+        if self.probability is None:
+            return
+        _require_finite("probability", self.probability)
+        if not 0.0 <= self.probability <= 1.0:
+            raise ValueError("probability must be in [0.0, 1.0]")
 
 
 @dataclass(frozen=True)
@@ -222,10 +266,21 @@ class TranscriptSegment:
 
     def __post_init__(self) -> None:
         _require_non_negative_int("index", self.index)
+        _require_finite("start", self.start)
+        _require_finite("end", self.end)
         if self.start < 0:
             raise ValueError("start must be non-negative")
         if self.end <= self.start:
             raise ValueError("end must be greater than start")
+        for name, value in (
+            ("avg_logprob", self.avg_logprob),
+            ("compression_ratio", self.compression_ratio),
+            ("no_speech_prob", self.no_speech_prob),
+            ("temperature", self.temperature),
+        ):
+            _require_optional_finite(name, value)
+        if self.no_speech_prob is not None and not 0.0 <= self.no_speech_prob <= 1.0:
+            raise ValueError("no_speech_prob must be in [0.0, 1.0]")
 
 
 @dataclass(frozen=True)
@@ -250,6 +305,14 @@ class Transcript:
     warnings: tuple[TranscriptWarning, ...]
     source_duration_seconds: float
     vad_duration_seconds: float | None
+
+    def __post_init__(self) -> None:
+        _require_finite("source_duration_seconds", self.source_duration_seconds)
+        if self.source_duration_seconds < 0:
+            raise ValueError("source_duration_seconds must be non-negative")
+        _require_optional_finite("vad_duration_seconds", self.vad_duration_seconds)
+        if self.vad_duration_seconds is not None and self.vad_duration_seconds < 0:
+            raise ValueError("vad_duration_seconds must be non-negative")
 
     def to_canonical_dict(self) -> dict[str, Any]:
         """Produce a stable, JSON-serialisable dict for canonical output."""
@@ -310,6 +373,7 @@ class Transcript:
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
+            allow_nan=False,
         ) + "\n"
 
 
@@ -329,52 +393,7 @@ class Artifact:
         if self.format not in ("json", "txt", "srt", "vtt"):
             raise ValueError("artifact format must be json, txt, srt or vtt")
         _require_non_negative_int("size_bytes", self.size_bytes)
-        if len(self.sha256) != 64:
-            raise ValueError("sha256 must be a 64-character hex digest")
-
-
-# ---------------------------------------------------------------------------
-# Views and events
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class JobView:
-    """Stable read-only projection of a job for the web/CLI layer."""
-
-    id: UUID
-    media_id: UUID
-    status: JobStatus
-    progress: int
-    stage_message: str | None
-    cancel_requested: bool
-    error_code: str | None
-    error_message: str | None
-    requested_language: str | None
-    requested_model: str | None
-    effective_profile: HardwareProfile | None
-    created_at: datetime
-    started_at: datetime | None
-    completed_at: datetime | None
-
-    @classmethod
-    def from_job(cls, job: TranscriptionJob) -> JobView:
-        return cls(
-            id=job.id,
-            media_id=job.media_id,
-            status=job.status,
-            progress=job.progress,
-            stage_message=job.stage_message,
-            cancel_requested=job.cancel_requested,
-            error_code=job.error_code,
-            error_message=job.error_message,
-            requested_language=job.requested_language,
-            requested_model=job.requested_model,
-            effective_profile=job.effective_profile,
-            created_at=job.created_at,
-            started_at=job.started_at,
-            completed_at=job.completed_at,
-        )
+        _require_sha256(self.sha256)
 
 
 @dataclass(frozen=True)
@@ -467,7 +486,3 @@ class TranscriptionJob:
         self.transition_to(JobStatus.FAILED, message=message)
         self.error_code = code
         self.error_message = message
-
-    def with_options(self, options: TranscriptionOptions) -> TranscriptionJob:
-        """Return a copy with frozen options replaced (used only at creation)."""
-        return replace(self, options=options)

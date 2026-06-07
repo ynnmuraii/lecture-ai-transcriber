@@ -9,8 +9,9 @@ between hosts without touching configuration.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
-from pydantic import computed_field
+from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,11 +36,11 @@ class Settings(BaseSettings):
     # to forbid network access at runtime (the web worker, the ASR engine).
     offline: bool = False
     host: str = "127.0.0.1"
-    port: int = 8000
-    max_upload_bytes: int = 4 * 1024 * 1024 * 1024
-    worker_lease_seconds: int = 120
-    worker_poll_interval_seconds: float = 1.0
-    log_level: str = "INFO"
+    port: int = Field(default=8000, ge=1, le=65_535)
+    max_upload_bytes: int = Field(default=4 * 1024 * 1024 * 1024, ge=1)
+    worker_lease_seconds: int = Field(default=120, ge=1)
+    worker_poll_interval_seconds: float = Field(default=1.0, ge=0.0)
+    log_level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = "INFO"
 
     @computed_field  # type: ignore[prop-decorator]
     @property
