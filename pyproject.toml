@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lecture-ai-transcriber"
+version = "2.0.0a1"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "faster-whisper>=1.2,<2",
+  "av>=14,<17",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "jinja2>=3.1,<4",
+  "python-multipart>=0.0.20,<1",
+  "typer>=0.16,<1",
+  "rich>=14,<15",
+  "sqlalchemy>=2.0,<3",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.8,<3",
+  "psutil>=6,<8",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<8",
+  "httpx>=0.28,<1",
+  "ruff>=0.11,<1",
+  "mypy>=1.15,<2",
+]
+
+[project.scripts]
+lecture-transcriber = "lecture_transcriber.cli.app:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lecture_transcriber"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["lecture_transcriber"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests/unit",
+    "tests/contract",
+    "tests/integration",
+    "tests/smoke",
+]
+markers = [
+    "model: requires a locally cached ASR model",
+    "slow: takes longer than normal unit and integration tests",
+]
