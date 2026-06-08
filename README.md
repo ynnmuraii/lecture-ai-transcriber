@@ -13,8 +13,7 @@ runs on your machine — no cloud, no telemetry, no hidden uploads.
   container.
 
 The 2.0 rewrite is a clean break from the 1.x pipeline. See
-[`docs/architecture/ARD.md`](docs/architecture/ARD.md) for the design
-and [`decisions/`](decisions/) for the architecture decision records.
+[`decisions/`](decisions/) for the architecture decision records.
 
 ## Requirements
 
