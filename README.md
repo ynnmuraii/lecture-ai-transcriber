@@ -39,6 +39,38 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+### NVIDIA GPU setup
+
+GPU support is optional; the application falls back to CPU when CUDA is not
+available. Current `faster-whisper`/CTranslate2 releases require:
+
+1. A recent [NVIDIA driver](https://www.nvidia.com/Download/index.aspx).
+2. [CUDA Toolkit 12](https://developer.nvidia.com/cuda-downloads).
+3. [cuDNN 9 for CUDA 12](https://developer.nvidia.com/cudnn-downloads).
+4. On Windows, the
+   [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+
+Use NVIDIA's platform-specific installers and follow the official
+[CUDA installation guide](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/)
+for Windows or
+[CUDA installation guide for Linux](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/).
+The upstream
+[`faster-whisper` GPU requirements](https://github.com/SYSTRAN/faster-whisper#gpu)
+are the source of truth if its CUDA/cuDNN requirements change.
+
+Verify the installation before running a transcription:
+
+```bash
+nvidia-smi
+nvcc --version
+python -c "import ctranslate2; print('CUDA devices:', ctranslate2.get_cuda_device_count())"
+python -c "import ctranslate2; print(ctranslate2.get_supported_compute_types('cuda'))"
+```
+
+The last two commands should report at least one CUDA device and a non-empty
+set of compute types. Restart the terminal after installing CUDA/cuDNN so that
+updated library paths are visible.
+
 The first run needs at least one model cached locally:
 
 ```bash
