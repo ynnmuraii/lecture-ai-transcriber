@@ -18,7 +18,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from lecture_transcriber.application.services.cancel_job import CancelJobService
 from lecture_transcriber.application.services.create_job import CreateJobService

@@ -19,10 +19,10 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from lecture_transcriber.domain.ports import ASREngine
 
@@ -94,9 +94,28 @@ def _edit_distance(ref: Sequence[str], hyp: Sequence[str]) -> int:
     return prev[m]
 
 
-def wer(reference: str, hypothesis: str, *, normalize_opts: dict[str, Any] | None = None) -> float:
+def _normalize_opts(
+    normalize_opts: Mapping[str, object] | None = None,
+) -> dict[str, bool]:
+    opts: dict[str, bool] = {"lowercase": True, "strip_punct": False}
+    if normalize_opts is None:
+        return opts
+    for key in ("lowercase", "strip_punct"):
+        value = normalize_opts.get(key, opts[key])
+        if not isinstance(value, bool):
+            raise TypeError(f"{key} must be a boolean")
+        opts[key] = value
+    return opts
+
+
+def wer(
+    reference: str,
+    hypothesis: str,
+    *,
+    normalize_opts: Mapping[str, object] | None = None,
+) -> float:
     """Word error rate after optional normalization."""
-    opts = {"lowercase": True, "strip_punct": False, **(normalize_opts or {})}
+    opts = _normalize_opts(normalize_opts)
     ref_words = normalize(reference, **opts).split()
     hyp_words = normalize(hypothesis, **opts).split()
     if not ref_words:
@@ -104,9 +123,14 @@ def wer(reference: str, hypothesis: str, *, normalize_opts: dict[str, Any] | Non
     return _edit_distance(ref_words, hyp_words) / len(ref_words)
 
 
-def cer(reference: str, hypothesis: str, *, normalize_opts: dict[str, Any] | None = None) -> float:
+def cer(
+    reference: str,
+    hypothesis: str,
+    *,
+    normalize_opts: Mapping[str, object] | None = None,
+) -> float:
     """Character error rate after optional normalization."""
-    opts = {"lowercase": True, "strip_punct": False, **(normalize_opts or {})}
+    opts = _normalize_opts(normalize_opts)
     ref_chars = list(normalize(reference, **opts).replace(" ", ""))
     hyp_chars = list(normalize(hypothesis, **opts).replace(" ", ""))
     if not ref_chars:
@@ -205,7 +229,7 @@ class CaseResult:
     model: str
     reference_path: str
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -226,7 +250,7 @@ class BenchmarkReport:
     def mean_rtf(self) -> float:
         return _safe_mean(c.rtf for c in self.cases)
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(self) -> dict[str, object]:
         return {
             "model": self.model,
             "aggregate": {

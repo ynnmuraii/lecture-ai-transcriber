@@ -8,8 +8,8 @@ this module.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
 from lecture_transcriber.application.services.cancel_job import CancelJobService
 from lecture_transcriber.application.services.create_job import CreateJobService
@@ -91,7 +91,7 @@ class ApplicationContainer:
         *,
         settings: Settings,
         session_factory: SessionFactory,
-        asr_engine_factory: Any,
+        asr_engine_factory: Callable[[Settings], ASREngine],
     ) -> ApplicationContainer:
         file_store = LocalFileStore(
             data_dir=settings.data_dir,

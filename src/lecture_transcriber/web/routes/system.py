@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 
 from lecture_transcriber.bootstrap import ApplicationContainer
 from lecture_transcriber.web.dependencies import get_container
-from lecture_transcriber.web.schemas import SystemOut
+from lecture_transcriber.web.schemas import HardwareOut, SystemOut
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -22,13 +22,13 @@ def get_system(
         data_dir=str(container.settings.data_dir),
         offline=container.settings.offline,
         max_upload_bytes=container.settings.max_upload_bytes,
-        hardware={
-            "ram_bytes": facts.ram_bytes,
-            "cpu_count": facts.cpu_count,
-            "cuda_available": facts.cuda_available,
-            "cuda_name": facts.cuda_name,
-            "vram_bytes": facts.vram_bytes,
-        },
+        hardware=HardwareOut(
+            ram_bytes=facts.ram_bytes,
+            cpu_count=facts.cpu_count,
+            cuda_available=facts.cuda_available,
+            cuda_name=facts.cuda_name,
+            vram_bytes=facts.vram_bytes,
+        ),
         available_models=available,
         asr_engine="faster-whisper",
         asr_version=faster_whisper.__version__,

@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from lecture_transcriber.application.services.cancel_job import CancelJobService
 from lecture_transcriber.application.services.create_job import CreateJobService

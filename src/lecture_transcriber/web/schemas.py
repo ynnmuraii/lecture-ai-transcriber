@@ -6,7 +6,7 @@ SQLAlchemy records or the absolute filesystem paths.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -92,10 +92,18 @@ class SystemOut(BaseModel):
     data_dir: str
     offline: bool
     max_upload_bytes: int
-    hardware: dict[str, Any]
+    hardware: HardwareOut
     available_models: list[str]
     asr_engine: str
     asr_version: str
+
+
+class HardwareOut(BaseModel):
+    ram_bytes: int
+    cpu_count: int
+    cuda_available: bool
+    cuda_name: str | None
+    vram_bytes: int | None
 
 
 class OkMessage(BaseModel):
@@ -108,6 +116,7 @@ __all__ = [
     "CreateJobIn",
     "ErrorBody",
     "ErrorEnvelope",
+    "HardwareOut",
     "ImportResponse",
     "JobDetailOut",
     "JobEventOut",

@@ -16,17 +16,24 @@ from lecture_transcriber.domain.ports import HardwareDetectorPort
 
 
 class PsutilHardwareDetector(HardwareDetectorPort):
+    def __init__(self) -> None:
+        self._cached: HardwareFacts | None = None
+
     def detect(self) -> HardwareFacts:
+        if self._cached is not None:
+            return self._cached
+
         ram = psutil.virtual_memory().total
         cpu_count = os.cpu_count() or 1
         cuda_available, cuda_name, vram_bytes = _probe_cuda()
-        return HardwareFacts(
+        self._cached = HardwareFacts(
             ram_bytes=int(ram),
             cpu_count=int(cpu_count),
             cuda_available=cuda_available,
             cuda_name=cuda_name,
             vram_bytes=vram_bytes,
         )
+        return self._cached
 
 
 def _probe_cuda() -> tuple[bool, str | None, int | None]:
