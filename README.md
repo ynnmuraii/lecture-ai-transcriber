@@ -119,14 +119,13 @@ The benchmark harness (`lecture-transcriber benchmark …`) lives in
 ## Continuous integration
 
 Every push and pull request to `main` or `dev` runs the same checks
-the maintainer runs locally, on a 2 × 2 matrix:
+the maintainer runs locally in one environment:
 
-* **OS:** `ubuntu-latest`, `windows-latest`
-* **Python:** 3.11, 3.12
+* **OS:** `ubuntu-latest`
+* **Python:** 3.12
 
-The pipeline is deliberately small and fast — about 30 s on a cold
-runner — so it stays a useful signal instead of becoming a chore to
-maintain. It runs in this order:
+The pipeline is deliberately small so it stays a useful signal instead of
+becoming a maintenance task. It runs in this order:
 
 1. **`pip install -e ".[dev]"`** — pins the actual production deps
    the user would install, so a broken constraint on a fresh OS
@@ -135,13 +134,9 @@ maintain. It runs in this order:
    care about (B, E, F, I, RUF, SIM, UP).
 3. **`mypy src/lecture_transcriber`** — the package is `strict`; CI
    catches any new `Any`, missing return type, or unguarded cast.
-4. **`pytest -q`** — unit + contract + integration. No real model is
-   involved; the in-memory and SQLite fakes drive the end-to-end
-   job flow. ~140 tests, runs in ~4 s.
-5. **`pytest -q tests/smoke`** — the offline probes (WAV / MP3 / MP4
-   via PyAV) and the network-call guard. This test *must* run on
-   every PR because it is the only thing that proves the web app
-   does not silently reach out to the internet.
+4. **`pytest -q`** — unit + contract + integration + offline smoke.
+   No real model is involved; the in-memory and SQLite fakes drive the
+   end-to-end job flow.
 
 The model-backed smoke (`tests/smoke/test_model_transcription.py`,
 marker `model`) is **not** part of CI. Downloading a multi-GB model

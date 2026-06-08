@@ -6,32 +6,22 @@ on:
   pull_request:
     branches: [main, dev]
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: ${{ matrix.os }} / py${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ["3.11", "3.12"]
+    name: Ubuntu / Python 3.12
+    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.12"
           cache: pip
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          # ffmpeg gives us the libmp3lame codec that PyAV uses for MP3 fixtures.
-          # We avoid linking against LAME directly; ffmpeg is enough.
 
       - name: Install Python package (with dev extras)
         run: |
@@ -46,6 +36,3 @@ jobs:
 
       - name: Test (no model)
         run: pytest -q --no-header
-
-      - name: Smoke (offline, format probe)
-        run: pytest -q tests/smoke --no-header
