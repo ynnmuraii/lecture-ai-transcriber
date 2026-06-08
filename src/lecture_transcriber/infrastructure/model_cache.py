@@ -63,15 +63,11 @@ class FilesystemModelCache(ModelCache):
         self._model_dir.mkdir(parents=True, exist_ok=True)
         self._downloader = downloader
         self._offline = offline
-        self._cached_models: tuple[CachedModel, ...] | None = None
 
     def is_available(self, model: str) -> bool:
         return _model_payload_dir(self._model_dir, model) is not None
 
     def list_models(self) -> tuple[CachedModel, ...]:
-        if self._cached_models is not None:
-            return self._cached_models
-
         out: list[CachedModel] = []
         seen: set[str] = set()
         for entry in sorted(self._model_dir.iterdir()):
@@ -87,7 +83,7 @@ class FilesystemModelCache(ModelCache):
                     out.append(
                         CachedModel(
                             name=model_name,
-                            size_bytes=_dir_size(payload),
+                            size_bytes=None,
                             path=payload,
                         )
                     )
@@ -99,13 +95,12 @@ class FilesystemModelCache(ModelCache):
                     out.append(
                         CachedModel(
                             name=entry.name,
-                            size_bytes=_dir_size(payload),
+                            size_bytes=None,
                             path=payload,
                         )
                     )
                     seen.add(entry.name)
-        self._cached_models = tuple(out)
-        return self._cached_models
+        return tuple(out)
 
     def download(self, model: str) -> CachedModel:
         if self._offline:
@@ -123,7 +118,6 @@ class FilesystemModelCache(ModelCache):
             raise ModelNotAvailable(
                 f"download for model {model!r} did not produce a complete model"
             )
-        self._cached_models = None
         return CachedModel(
             name=model, size_bytes=_dir_size(payload), path=payload
         )

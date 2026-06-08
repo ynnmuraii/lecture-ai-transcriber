@@ -100,6 +100,10 @@ def _normalize_opts(
     opts: dict[str, bool] = {"lowercase": True, "strip_punct": False}
     if normalize_opts is None:
         return opts
+    unknown = set(normalize_opts) - set(opts)
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise TypeError(f"unknown normalization option: {names}")
     for key in ("lowercase", "strip_punct"):
         value = normalize_opts.get(key, opts[key])
         if not isinstance(value, bool):

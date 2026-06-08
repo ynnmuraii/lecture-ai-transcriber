@@ -69,6 +69,15 @@ def test_wer_handles_case_and_punctuation() -> None:
     )
 
 
+def test_wer_rejects_unknown_normalization_option() -> None:
+    with pytest.raises(TypeError, match="unknown normalization option"):
+        wer(
+            "Привет, мир!",
+            "привет мир",
+            normalize_opts={"strip_punctuation": True},
+        )
+
+
 # ---------------------------------------------------------------------------
 # CER
 # ---------------------------------------------------------------------------

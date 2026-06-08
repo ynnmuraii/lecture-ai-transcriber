@@ -132,7 +132,7 @@ class HardwareDetectorPort(Protocol):
 @dataclass(frozen=True)
 class CachedModel:
     name: str
-    size_bytes: int
+    size_bytes: int | None
     path: Path
 
 

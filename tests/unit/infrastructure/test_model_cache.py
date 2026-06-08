@@ -73,3 +73,34 @@ def test_incomplete_model_directory_is_not_available(tmp_path: Path) -> None:
 
     assert cache.is_available("small") is False
     assert cache.list_models() == ()
+
+
+def test_list_models_reflects_models_added_outside_cache(
+    tmp_path: Path,
+) -> None:
+    model_dir = tmp_path / "models"
+    cache = FilesystemModelCache(model_dir, offline=True)
+    assert cache.list_models() == ()
+
+    payload = model_dir / "small"
+    payload.mkdir()
+    (payload / "config.json").write_text("{}")
+    (payload / "model.bin").write_bytes(b"weights")
+
+    assert [model.name for model in cache.list_models()] == ["small"]
+
+
+def test_list_models_does_not_walk_model_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = FilesystemModelCache(_make_model_dir(tmp_path), offline=True)
+
+    def fail_rglob(_path: Path, _pattern: str) -> None:
+        raise AssertionError("list_models must not recursively scan payloads")
+
+    monkeypatch.setattr(Path, "rglob", fail_rglob)
+
+    models = cache.list_models()
+
+    assert models[0].size_bytes is None
