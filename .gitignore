@@ -1,5 +1,3 @@
-.kiro
-
 # Python
 __pycache__/
 *.py[cod]
@@ -25,16 +23,10 @@ MANIFEST
 
 # Virtual environments
 .venv/
-venv/
-env/
-ENV/
 
 # IDE
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
 
 # OS
 .DS_Store
@@ -46,25 +38,16 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
-temp/
-logs/
+
 *.log
-output/
-test_output/
 test_temp/
 data/
-*.wav
-*.mp4
-*.mkv
-*.webm
 
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
-.hypothesis/
-test_output/
 
 
 # Documentation
