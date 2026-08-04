@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 
 from lecture_transcriber.application.exporters import (
     format_srt_timestamp,
     format_vtt_timestamp,
+    parse_canonical,
     to_json,
     to_srt,
     to_txt,
@@ -27,6 +30,7 @@ from lecture_transcriber.domain.models import (
     Transcript,
     TranscriptSegment,
     TranscriptWarning,
+    TranscriptWord,
     WarningCode,
 )
 from lecture_transcriber.infrastructure.file_store import LocalFileStore
@@ -86,6 +90,23 @@ def _transcript() -> Transcript:
     )
 
 
+def _transcript_v2() -> Transcript:
+    t = _transcript()
+    seg = t.segments[0]
+    seg = replace(
+        seg,
+        words=(
+            TranscriptWord(
+                index=0, start=0.0, end=0.5, text="Добрый", probability=0.9
+            ),
+            TranscriptWord(
+                index=1, start=0.6, end=1.0, text="день,", probability=0.95
+            ),
+        ),
+    )
+    return replace(t, schema_version="2.0", segments=(seg, t.segments[1]))
+
+
 def test_to_txt_is_one_segment_per_line() -> None:
     t = _transcript()
     assert to_txt(t) == "Добрый день, коллеги.\nСегодня про tensor cores.\n"
@@ -142,3 +163,59 @@ def test_export_service_writes_atomic_artifact(tmp_path: Path) -> None:
     assert stored.artifact.format == "txt"
     assert stored.physical_path.is_file()
     assert stored.artifact.size_bytes > 0
+
+
+def _v1_payload() -> str:
+    """A v1-shaped canonical payload: no transcript_kind, no ids/words."""
+    data = _transcript().to_canonical_dict()
+    data.pop("transcript_kind")
+    for seg in data["segments"]:
+        seg.pop("id")
+        seg.pop("words")
+    return json.dumps(data)
+
+
+def test_parse_canonical_v1_migration_view() -> None:
+    parsed = parse_canonical(_v1_payload())
+    assert parsed.schema_version == "1.0"
+    assert parsed.transcript_kind == "raw_canonical"
+    assert all(seg.words == () for seg in parsed.segments)
+    canonical = parsed.to_canonical_dict()
+    assert canonical["transcript_kind"] == "raw_canonical"
+    for i, seg in enumerate(canonical["segments"]):
+        assert seg["id"] == str(uuid5(parsed.job_id, f"segment:{i}"))
+        assert seg["words"] == []
+
+
+def test_parse_canonical_v2_round_trip_byte_for_byte() -> None:
+    t = _transcript_v2()
+    payload = t.canonical_json()
+    assert parse_canonical(payload).canonical_json() == payload
+
+
+def test_parse_canonical_unsupported_version_raises() -> None:
+    data = _transcript().to_canonical_dict()
+    data["schema_version"] = "9.9"
+    with pytest.raises(ValueError, match="unsupported schema_version"):
+        parse_canonical(json.dumps(data))
+
+
+def test_parse_canonical_rejects_unknown_top_level_field() -> None:
+    data = _transcript_v2().to_canonical_dict()
+    data["unknown_top"] = True
+    with pytest.raises(ValueError, match="unknown_top"):
+        parse_canonical(json.dumps(data))
+
+
+def test_parse_canonical_rejects_unknown_nested_field() -> None:
+    data = _transcript_v2().to_canonical_dict()
+    data["media"]["bogus"] = 1.0
+    with pytest.raises(ValueError, match="bogus"):
+        parse_canonical(json.dumps(data))
+
+
+def test_parse_canonical_v2_rejects_mismatched_segment_id() -> None:
+    data = _transcript_v2().to_canonical_dict()
+    data["segments"][0]["id"] = str(uuid4())
+    with pytest.raises(ValueError, match="segment id mismatch"):
+        parse_canonical(json.dumps(data))
