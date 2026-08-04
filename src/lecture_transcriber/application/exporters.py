@@ -8,20 +8,20 @@ parses versioned canonical JSON back into a :class:`Transcript`.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import UUID, uuid5
 
+from lecture_transcriber.domain.enums import MediaType, WarningCode
 from lecture_transcriber.domain.models import (
     EngineMetadata,
     LanguageMetadata,
     Media,
-    MediaType,
     Transcript,
     TranscriptSegment,
     TranscriptWarning,
     TranscriptWord,
-    WarningCode,
 )
 
 
@@ -178,15 +178,13 @@ def _require_optional_str(data: dict[str, Any], key: str, path: str) -> str | No
     return value
 
 
-def _require_int(data: dict[str, Any], key: str, path: str, *, required: bool) -> int:
+def _require_int(data: dict[str, Any], key: str, path: str) -> int:
     if key not in data:
-        if required:
-            raise ValueError(f"missing required field {key!r} at {path}")
-        return None
+        raise ValueError(f"missing required field {key!r} at {path}")
     value = data[key]
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{path}.{key} must be an integer")
-    return value
+    return int(value)
 
 
 def _require_optional_int(data: dict[str, Any], key: str, path: str) -> int | None:
@@ -195,14 +193,12 @@ def _require_optional_int(data: dict[str, Any], key: str, path: str) -> int | No
     value = data[key]
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{path}.{key} must be an integer or null")
-    return value
+    return int(value)
 
 
-def _require_float(data: dict[str, Any], key: str, path: str, *, required: bool) -> float:
+def _require_float(data: dict[str, Any], key: str, path: str) -> float:
     if key not in data:
-        if required:
-            raise ValueError(f"missing required field {key!r} at {path}")
-        return None
+        raise ValueError(f"missing required field {key!r} at {path}")
     value = data[key]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{path}.{key} must be a number")
@@ -234,6 +230,12 @@ def _require_str_list(data: dict[str, Any], key: str, path: str) -> tuple[str, .
     return tuple(value)
 
 
+def _parse_device(value: str, path: str) -> Literal["cpu", "cuda"]:
+    if value not in ("cpu", "cuda"):
+        raise ValueError(f"{path}.device must be 'cpu' or 'cuda'")
+    return cast(Literal["cpu", "cuda"], value)
+
+
 def _parse_media(data: dict[str, Any]) -> Media:
     path = "media"
     media = _require_dict(data, path)
@@ -247,8 +249,8 @@ def _parse_media(data: dict[str, Any]) -> Media:
         stored_path=original_name,
         media_type=MediaType(_require_str(media, "media_type", path)),
         mime_type=_require_optional_str(media, "mime_type", path),
-        size_bytes=_require_int(media, "size_bytes", path, required=True),
-        duration_seconds=_require_float(media, "duration_seconds", path, required=True),
+        size_bytes=_require_int(media, "size_bytes", path),
+        duration_seconds=_require_float(media, "duration_seconds", path),
         sha256=_require_str(media, "sha256", path),
         created_at=datetime.fromtimestamp(0, tz=UTC),
     )
@@ -262,7 +264,7 @@ def _parse_engine(data: dict[str, Any]) -> EngineMetadata:
         name=_require_str(engine, "name", path),
         version=_require_str(engine, "version", path),
         model=_require_str(engine, "model", path),
-        device=_require_str(engine, "device", path),
+        device=_parse_device(_require_str(engine, "device", path), path),
         compute_type=_require_str(engine, "compute_type", path),
     )
 
@@ -287,9 +289,9 @@ def _parse_words(data: dict[str, Any], path: str) -> tuple[TranscriptWord, ...]:
         _reject_unknown(word, _WORD_ALLOWED, word_path)
         out.append(
             TranscriptWord(
-                index=_require_int(word, "index", word_path, required=True),
-                start=_require_float(word, "start", word_path, required=True),
-                end=_require_float(word, "end", word_path, required=True),
+                index=_require_int(word, "index", word_path),
+                start=_require_float(word, "start", word_path),
+                end=_require_float(word, "end", word_path),
                 text=_require_str(word, "text", word_path),
                 probability=_require_optional_float(word, "probability", word_path),
             )
@@ -311,7 +313,7 @@ def _parse_segments(
         seg_path = f"{path}[{i}]"
         seg = _require_dict(item, seg_path)
         _reject_unknown(seg, allowed, seg_path)
-        index = _require_int(seg, "index", seg_path, required=True)
+        index = _require_int(seg, "index", seg_path)
         if require_ids_words:
             seg_id = _require_str(seg, "id", seg_path)
             expected = str(uuid5(job_id, f"segment:{index}"))
@@ -326,8 +328,8 @@ def _parse_segments(
         out.append(
             TranscriptSegment(
                 index=index,
-                start=_require_float(seg, "start", seg_path, required=True),
-                end=_require_float(seg, "end", seg_path, required=True),
+                start=_require_float(seg, "start", seg_path),
+                end=_require_float(seg, "end", seg_path),
                 text=_require_str(seg, "text", seg_path),
                 avg_logprob=_require_optional_float(seg, "avg_logprob", seg_path),
                 compression_ratio=_require_optional_float(
@@ -375,7 +377,7 @@ def _build_transcript(
         engine=_parse_engine(data["engine"]),
         language=_parse_language(data["language"]),
         source_duration_seconds=_require_float(
-            data, "source_duration_seconds", "top-level", required=True
+            data, "source_duration_seconds", "top-level"
         ),
         vad_duration_seconds=_require_optional_float(
             data, "vad_duration_seconds", "top-level"
@@ -403,7 +405,10 @@ def _read_v2(data: dict[str, Any]) -> Transcript:
     return _build_transcript(data, "2.0", require_ids_words=True)
 
 
-_READERS: dict[str, Any] = {"1.0": _read_v1, "2.0": _read_v2}
+_READERS: dict[str, Callable[[dict[str, Any]], Transcript]] = {
+    "1.0": _read_v1,
+    "2.0": _read_v2,
+}
 
 
 def parse_canonical(payload: str) -> Transcript:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from typing import TypeGuard
 
 from lecture_transcriber.domain.enums import WarningCode
 from lecture_transcriber.domain.models import (
@@ -139,24 +140,13 @@ def validate_transcript(
             for word_index, word in enumerate(seg.words):
                 start = getattr(word, "start", None)
                 end = getattr(word, "end", None)
-                start_is_finite = _is_finite_number(start)
-                end_is_finite = _is_finite_number(end)
 
-                if not start_is_finite or not end_is_finite or start < 0 or end <= start:
-                    if WarningCode.WORD_INVALID_RANGE.value not in reasons:
-                        reasons.append(WarningCode.WORD_INVALID_RANGE.value)
-                    _add(
-                        warnings,
-                        TranscriptWarning(
-                            code=WarningCode.WORD_INVALID_RANGE,
-                            message=(
-                                f"segment {seg.index} word {word_index} has "
-                                f"invalid range start={start!r} end={end!r}"
-                            ),
-                            segment_index=seg.index,
-                        ),
-                    )
-                else:
+                if (
+                    _is_finite_number(start)
+                    and _is_finite_number(end)
+                    and start >= 0
+                    and end > start
+                ):
                     if (
                         prev_word_end is not None
                         and start < prev_word_end - TIMESTAMP_TOLERANCE_SECONDS
@@ -193,8 +183,22 @@ def validate_transcript(
                                 segment_index=seg.index,
                             ),
                         )
+                else:
+                    if WarningCode.WORD_INVALID_RANGE.value not in reasons:
+                        reasons.append(WarningCode.WORD_INVALID_RANGE.value)
+                    _add(
+                        warnings,
+                        TranscriptWarning(
+                            code=WarningCode.WORD_INVALID_RANGE,
+                            message=(
+                                f"segment {seg.index} word {word_index} has "
+                                f"invalid range start={start!r} end={end!r}"
+                            ),
+                            segment_index=seg.index,
+                        ),
+                    )
 
-                if end_is_finite:
+                if _is_finite_number(end):
                     prev_word_end = float(end)
 
         new_segments.append(
@@ -228,7 +232,7 @@ def validate_transcript(
     )
 
 
-def _is_finite_number(value: object) -> bool:
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
     """True when ``value`` is a finite real number (not a bool/string)."""
     return (
         isinstance(value, (int, float))
