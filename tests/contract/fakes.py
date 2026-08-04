@@ -83,6 +83,10 @@ class FakeASREngine(ASREngine):
         self._compute_type = compute_type
         self._source_duration = source_duration
         self._vad_duration = vad_duration
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
     def prepare(
         self,

@@ -174,6 +174,8 @@ class ASREngine(Protocol):
         is_cancelled: Callable[[], bool],
     ) -> ASRResult: ...
 
+    def close(self) -> None: ...
+
 
 # ---------------------------------------------------------------------------
 # Persistence

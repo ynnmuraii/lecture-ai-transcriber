@@ -79,6 +79,9 @@ class _BoomEngine(ASREngine):
     def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
         raise AsrFailed("engine boom")
 
+    def close(self):  # type: ignore[no-untyped-def]
+        return None
+
 
 class _FailingProbe(MediaProbe):
     def probe(self, path: Path) -> MediaProbeResult:
@@ -479,6 +482,9 @@ def test_error_message_does_not_leak_absolute_path(stack) -> None:
 
         def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
             raise AsrFailed(f"cannot open {media_path}")
+
+        def close(self):  # type: ignore[no-untyped-def]
+            return None
 
     run = _build_run(stack, engine=PathBoomEngine())
     run.run_job(summary.id)
