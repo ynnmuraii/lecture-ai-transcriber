@@ -18,6 +18,8 @@ class JobStatus(StrEnum):
     TRANSCRIBING = "transcribing"
     VALIDATING = "validating"
     EXPORTING = "exporting"
+    DIARIZING = "diarizing"
+    POLISHING = "polishing"
     COMPLETED = "completed"
     COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     FAILED = "failed"
@@ -35,6 +37,11 @@ TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
 
 
 # Allowed forward transitions of the job state machine.
+#
+# The optional DIARIZING and POLISHING stages follow EXPORTING and may be
+# skipped entirely; when enabled they each funnel back into completion or
+# terminal states.  EXPORTING can therefore reach the completion states
+# directly (as before) *or* hand off to DIARIZING/POLISHING first.
 ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.QUEUED: frozenset(
         {
@@ -73,6 +80,25 @@ ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     ),
     JobStatus.EXPORTING: frozenset(
         {
+            JobStatus.DIARIZING,
+            JobStatus.POLISHING,
+            JobStatus.COMPLETED,
+            JobStatus.COMPLETED_WITH_WARNINGS,
+            JobStatus.CANCELLED,
+            JobStatus.FAILED,
+        }
+    ),
+    JobStatus.DIARIZING: frozenset(
+        {
+            JobStatus.POLISHING,
+            JobStatus.COMPLETED,
+            JobStatus.COMPLETED_WITH_WARNINGS,
+            JobStatus.CANCELLED,
+            JobStatus.FAILED,
+        }
+    ),
+    JobStatus.POLISHING: frozenset(
+        {
             JobStatus.COMPLETED,
             JobStatus.COMPLETED_WITH_WARNINGS,
             JobStatus.CANCELLED,
@@ -107,6 +133,10 @@ class WarningCode(StrEnum):
     WORD_TIMESTAMP_OVERLAP = "WORD_TIMESTAMP_OVERLAP"
     WORD_TIMESTAMP_OUT_OF_RANGE = "WORD_TIMESTAMP_OUT_OF_RANGE"
     WORD_INVALID_RANGE = "WORD_INVALID_RANGE"
+    DIARIZATION_FAILED = "DIARIZATION_FAILED"
+    POLISH_FAILED = "POLISH_FAILED"
+    POLISH_SCHEMA_MISMATCH = "POLISH_SCHEMA_MISMATCH"
+    SPEAKER_AMBIGUOUS = "SPEAKER_AMBIGUOUS"
 
 
 class ErrorCode(StrEnum):
@@ -119,8 +149,42 @@ class ErrorCode(StrEnum):
     MODEL_LOAD_FAILED = "MODEL_LOAD_FAILED"
     ASR_FAILED = "ASR_FAILED"
     EXPORT_FAILED = "EXPORT_FAILED"
+    DIARIZATION_FAILED = "DIARIZATION_FAILED"
+    POLISH_FAILED = "POLISH_FAILED"
     CANCELLED = "CANCELLED"
     LEASE_LOST = "LEASE_LOST"
     UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"
     INVALID_OPTIONS = "INVALID_OPTIONS"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class ASREngineChoice(StrEnum):
+    """Which ASR runtime to use for a job.
+
+    ``auto`` lets the system choose; at present it always resolves to
+    ``faster-whisper`` until a second adapter is benchmarked and promoted.
+    """
+
+    AUTO = "auto"
+    FASTER_WHISPER = "faster-whisper"
+    GIGAAM = "gigaam"
+
+
+class DiarizationBackend(StrEnum):
+    """Which speaker-diarization backend to use.
+
+    ``off`` means diarization is skipped entirely.
+    """
+
+    OFF = "off"
+    PYANNOTE = "pyannote"
+
+
+class PolishBackend(StrEnum):
+    """Which AI-polishing backend to use.
+
+    ``off`` means polishing is skipped entirely.
+    """
+
+    OFF = "off"
+    OLLAMA = "ollama"

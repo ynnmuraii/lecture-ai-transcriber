@@ -17,6 +17,9 @@ from uuid import UUID, uuid5
 
 from lecture_transcriber.domain.enums import (
     ALLOWED_TRANSITIONS,
+    ASREngineChoice,
+    DiarizationBackend,
+    PolishBackend,
     TERMINAL_STATUSES,
     JobStatus,
     MediaType,
@@ -99,6 +102,26 @@ class TranscriptionOptions:
 
     Once a job is created these fields never change, which is enforced by
     :class:`TranscriptionJob`.
+
+    New stage-selection fields
+    --------------------------
+    engine
+        Which ASR runtime to use.  ``auto`` defers to the system default
+        (currently ``faster-whisper``); specify ``gigaam`` to use the GigaAM
+        adapter when it is installed.
+    diarization
+        Speaker-diarization backend.  ``off`` (default) skips diarization;
+        ``pyannote`` runs the pyannote.audio adapter as an optional stage.
+    polish
+        AI-polishing backend.  ``off`` (default) skips polishing;
+        ``ollama`` sends ``needs_review`` segments to a local Ollama model.
+    polish_model
+        Ollama model tag used when ``polish=ollama``.  An empty string means
+        "use the application default" (e.g. ``t-lite-it-2.1:q4_k_m``).
+    polish_full_transcript
+        When ``True`` every segment is sent for polishing, not just those
+        flagged ``needs_review=True``.  Defaults to ``False`` to preserve
+        the immutable raw transcript as the primary artefact.
     """
 
     language: str | None = None
@@ -111,6 +134,12 @@ class TranscriptionOptions:
     vad_speech_pad_ms: int = 200
     hotwords: str | None = None
     chunk_length_seconds: int = 30
+    # Stage-selection (new; backward-compatible defaults keep existing behaviour)
+    engine: ASREngineChoice = ASREngineChoice.AUTO
+    diarization: DiarizationBackend = DiarizationBackend.OFF
+    polish: PolishBackend = PolishBackend.OFF
+    polish_model: str = ""
+    polish_full_transcript: bool = False
 
     def __post_init__(self) -> None:
         if self.language is not None and len(self.language) > 16:
@@ -144,11 +173,40 @@ class TranscriptionOptions:
             "vad_speech_pad_ms": self.vad_speech_pad_ms,
             "hotwords": self.hotwords,
             "chunk_length_seconds": self.chunk_length_seconds,
+            "engine": self.engine.value,
+            "diarization": self.diarization.value,
+            "polish": self.polish.value,
+            "polish_model": self.polish_model,
+            "polish_full_transcript": self.polish_full_transcript,
         }
 
     @classmethod
     def from_jsonable(cls, data: dict[str, Any]) -> TranscriptionOptions:
         try:
+            raw_engine = data.get("engine", ASREngineChoice.AUTO.value)
+            try:
+                engine = ASREngineChoice(raw_engine)
+            except ValueError:
+                raise ValueError(
+                    f"engine must be one of {[e.value for e in ASREngineChoice]}, got {raw_engine!r}"
+                )
+            raw_diarization = data.get("diarization", DiarizationBackend.OFF.value)
+            try:
+                diarization = DiarizationBackend(raw_diarization)
+            except ValueError:
+                raise ValueError(
+                    f"diarization must be one of {[e.value for e in DiarizationBackend]}, got {raw_diarization!r}"
+                )
+            raw_polish = data.get("polish", PolishBackend.OFF.value)
+            try:
+                polish = PolishBackend(raw_polish)
+            except ValueError:
+                raise ValueError(
+                    f"polish must be one of {[e.value for e in PolishBackend]}, got {raw_polish!r}"
+                )
+            polish_full = data.get("polish_full_transcript", False)
+            if not isinstance(polish_full, bool):
+                raise ValueError("polish_full_transcript must be a boolean")
             return cls(
                 language=data.get("language"),
                 model_override=data.get("model_override"),
@@ -164,6 +222,11 @@ class TranscriptionOptions:
                 vad_speech_pad_ms=int(data.get("vad_speech_pad_ms", 200)),
                 hotwords=data.get("hotwords"),
                 chunk_length_seconds=int(data.get("chunk_length_seconds", 30)),
+                engine=engine,
+                diarization=diarization,
+                polish=polish,
+                polish_model=str(data.get("polish_model", "")),
+                polish_full_transcript=polish_full,
             )
         except (TypeError, ValueError) as exc:
             raise InvalidOptions(str(exc)) from exc
@@ -244,6 +307,116 @@ class LanguageMetadata:
             raise ValueError("probability must be in [0.0, 1.0]")
 
 
+# ---------------------------------------------------------------------------
+# Word-level and diarization value objects
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WordTiming:
+    """One word returned by the ASR engine with per-word timestamps.
+
+    These are **raw ASR outputs** and must never be modified by diarization or
+    polishing.  Speaker assignment (``speaker_id``) is added by the diarization
+    stage and is ``None`` when diarization is disabled or the word falls in an
+    ambiguous gap between two speaker turns.
+    """
+
+    word: str
+    start: float
+    end: float
+    probability: float | None = None
+    speaker_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.word:
+            raise ValueError("word must not be empty")
+        _require_finite("start", self.start)
+        _require_finite("end", self.end)
+        if self.start < 0:
+            raise ValueError("start must be non-negative")
+        if self.end <= self.start:
+            raise ValueError("end must be greater than start")
+        if self.probability is not None:
+            _require_finite("probability", self.probability)
+            if not 0.0 <= self.probability <= 1.0:
+                raise ValueError("probability must be in [0.0, 1.0]")
+
+
+@dataclass(frozen=True)
+class DiarizationTurn:
+    """One speaker turn returned by the diarization engine.
+
+    This is a **raw diarization output** — the text of the turn is derived
+    later by mapping words whose timestamps overlap this interval.
+    ``speaker_id`` is an opaque label assigned by the diarization backend
+    (e.g. ``"SPEAKER_00"``).
+    """
+
+    speaker_id: str
+    start: float
+    end: float
+
+    def __post_init__(self) -> None:
+        if not self.speaker_id:
+            raise ValueError("speaker_id must not be empty")
+        _require_finite("start", self.start)
+        _require_finite("end", self.end)
+        if self.start < 0:
+            raise ValueError("start must be non-negative")
+        if self.end <= self.start:
+            raise ValueError("end must be greater than start")
+
+
+@dataclass(frozen=True)
+class PolishResult:
+    """The polished text for a single segment returned by the polish engine.
+
+    ``segment_index`` matches the corresponding :class:`TranscriptSegment`
+    index.  ``polished_text`` is ``None`` when the engine left the text
+    unchanged (``changed=False``).  The raw segment text remains the source
+    of truth; this is a separate derived artefact.
+    """
+
+    segment_index: int
+    polished_text: str | None
+    changed: bool
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int("segment_index", self.segment_index)
+        if self.changed and not self.polished_text:
+            raise ValueError(
+                "polished_text must be set when changed=True"
+            )
+
+
+@dataclass(frozen=True)
+class EditorRevision:
+    """A human correction applied to a single segment via the review UI.
+
+    The revision carries the editor's text alongside the segment index so the
+    pipeline can store it as provenance without mutating the raw transcript.
+    ``revised_text`` replaces the display text for that segment only in
+    derived exports; the canonical raw text is never overwritten.
+    """
+
+    segment_index: int
+    revised_text: str
+    revised_at: datetime
+    editor_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int("segment_index", self.segment_index)
+        if not self.revised_text:
+            raise ValueError("revised_text must not be empty")
+
+
+# ---------------------------------------------------------------------------
+# Core transcript (raw; speaker/polish/editor fields live outside)
+# ---------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
 class TranscriptWord:
     """One word-level transcription unit within a segment.
@@ -280,6 +453,10 @@ class TranscriptSegment:
     The text is preserved exactly as the engine returned it (apart from a
     single outer-whitespace strip in the canonical exporter). The application
     must not rewrite, merge or drop segments.
+
+    ``speaker_id`` is set by the diarization stage; it is ``None`` when
+    diarization is disabled or the segment timestamp falls in an ambiguous
+    gap.  It is informational and **must not** influence the raw text.
     """
 
     index: int
@@ -330,7 +507,13 @@ class TranscriptWarning:
 
 @dataclass(frozen=True)
 class Transcript:
-    """The canonical, versioned transcript object."""
+    """The canonical, versioned transcript object.
+
+    This object represents the **raw ASR output** and is immutable once
+    created.  Diarization speaker labels, AI-polished text, and editor
+    revisions are separate derived artefacts that reference this transcript
+    by ``job_id``; they must never overwrite the fields here.
+    """
 
     schema_version: str
     job_id: UUID

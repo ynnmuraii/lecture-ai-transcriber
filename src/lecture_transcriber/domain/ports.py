@@ -17,15 +17,19 @@ from uuid import UUID
 from lecture_transcriber.domain.enums import JobStatus
 from lecture_transcriber.domain.models import (
     Artifact,
+    DiarizationTurn,
+    EditorRevision,
     EngineMetadata,
     HardwareFacts,
     HardwareProfile,
     JobEvent,
     LanguageMetadata,
     Media,
+    PolishResult,
     TranscriptionJob,
     TranscriptionOptions,
     TranscriptSegment,
+    WordTiming,
 )
 
 __all__ = [
@@ -34,6 +38,9 @@ __all__ = [
     "ArtifactRepository",
     "CachedModel",
     "Clock",
+    "DiarizationEngine",
+    "DiarizationResult",
+    "EditorRevision",
     "FileStore",
     "HardwareDetectorPort",
     "JobEventRepository",
@@ -42,8 +49,11 @@ __all__ = [
     "MediaProbeResult",
     "MediaRepository",
     "ModelCache",
+    "PolishEngine",
+    "PolishRequest",
     "StoredArtifact",
     "StoredMedia",
+    "WordTiming",
 ]
 
 
@@ -155,6 +165,8 @@ class ASRResult:
     source_duration_seconds: float
     vad_duration_seconds: float | None
     segments: tuple[TranscriptSegment, ...]
+    words: tuple[WordTiming, ...] = ()
+    """Per-word timings when the engine supports them (empty when not available)."""
 
 
 @runtime_checkable
@@ -174,7 +186,114 @@ class ASREngine(Protocol):
         is_cancelled: Callable[[], bool],
     ) -> ASRResult: ...
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release GPU/CPU resources held by the engine.
+
+        Implementations that do not hold persistent resources may implement
+        this as a no-op. The pipeline calls ``close()`` between stages so
+        that the GPU budget is freed before the next heavy runtime is loaded.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Diarization
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DiarizationResult:
+    """Speaker-turn output from a diarization engine.
+
+    ``turns`` is ordered by start time. The engine must not include
+    overlapping turns; the pipeline resolves speaker ambiguity by majority
+    overlap with word timestamps.
+    """
+
+    turns: tuple[DiarizationTurn, ...]
+    engine_name: str
+    model_name: str
+
+
+@runtime_checkable
+class DiarizationEngine(Protocol):
+    """Port for optional speaker-diarization adapters.
+
+    The contract mirrors :class:`ASREngine` intentionally: the pipeline calls
+    ``prepare()`` once, then ``diarize()`` per file, then ``close()`` to free
+    GPU memory before the next stage starts.
+    """
+
+    def prepare(
+        self,
+        options: TranscriptionOptions,
+        is_cancelled: Callable[[], bool],
+    ) -> None:
+        """Load model weights and warm up the runtime."""
+        ...
+
+    def diarize(
+        self,
+        media_path: Path,
+        options: TranscriptionOptions,
+        is_cancelled: Callable[[], bool],
+    ) -> DiarizationResult:
+        """Run diarization and return ordered speaker turns."""
+        ...
+
+    def close(self) -> None:
+        """Release GPU/CPU resources held by the engine."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Polish
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PolishRequest:
+    """Input to :meth:`PolishEngine.polish`.
+
+    ``segments`` contains the segments to be polished. ``context_segments``
+    are adjacent read-only segments whose results are discarded.
+    """
+
+    segments: tuple[TranscriptSegment, ...]
+    context_segments: tuple[TranscriptSegment, ...]
+    language: str | None
+    model: str
+    full: bool
+
+
+@runtime_checkable
+class PolishEngine(Protocol):
+    """Port for optional AI-polishing adapters such as local Ollama.
+
+    Polishing never modifies the raw canonical transcript. Returned results
+    stay in the same order and use contiguous ``TranscriptSegment.index``
+    values as their stable positional identity.
+    """
+
+    def prepare(
+        self,
+        options: TranscriptionOptions,
+        is_cancelled: Callable[[], bool],
+    ) -> None:
+        """Connect to the backend and verify the requested model."""
+        ...
+
+    def polish(
+        self,
+        request: PolishRequest,
+        is_cancelled: Callable[[], bool],
+    ) -> tuple[PolishResult, ...]:
+        """Return one ordered result for every requested segment."""
+        ...
+
+    def close(self) -> None:
+        """Release connections or loaded model resources."""
+        ...
 
 
 # ---------------------------------------------------------------------------

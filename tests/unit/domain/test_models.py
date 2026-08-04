@@ -525,3 +525,197 @@ def test_ports_module_exposes_typed_protocols() -> None:
     assert hasattr(ports, "FileStore")
     assert hasattr(ports, "MediaProbe")
     assert hasattr(ports, "JobEvent")
+
+
+# ---------------------------------------------------------------------------
+# Stage-selection fields in TranscriptionOptions (backward-compat + new)
+# ---------------------------------------------------------------------------
+
+
+def test_options_default_stage_fields_are_off() -> None:
+    """New fields must default to the off/auto values so existing jobs are unaffected."""
+    from lecture_transcriber.domain.enums import ASREngineChoice, DiarizationBackend, PolishBackend
+
+    opts = TranscriptionOptions()
+    assert opts.engine == ASREngineChoice.AUTO
+    assert opts.diarization == DiarizationBackend.OFF
+    assert opts.polish == PolishBackend.OFF
+    assert opts.polish_model == ""
+    assert opts.polish_full_transcript is False
+
+
+def test_options_stage_fields_round_trip() -> None:
+    """engine/diarization/polish round-trip through to_jsonable / from_jsonable."""
+    from lecture_transcriber.domain.enums import ASREngineChoice, DiarizationBackend, PolishBackend
+
+    opts = TranscriptionOptions(
+        language="ru",
+        engine=ASREngineChoice.GIGAAM,
+        diarization=DiarizationBackend.PYANNOTE,
+        polish=PolishBackend.OLLAMA,
+        polish_model="t-lite-it-2.1:q4_k_m",
+        polish_full_transcript=True,
+    )
+    data = opts.to_jsonable()
+    restored = TranscriptionOptions.from_jsonable(data)
+    assert restored == opts
+    assert data["engine"] == "gigaam"
+    assert data["diarization"] == "pyannote"
+    assert data["polish"] == "ollama"
+    assert data["polish_model"] == "t-lite-it-2.1:q4_k_m"
+    assert data["polish_full_transcript"] is True
+
+
+def test_options_reject_unknown_engine() -> None:
+    with pytest.raises(InvalidOptions, match="engine"):
+        TranscriptionOptions.from_jsonable({"engine": "whisper.cpp"})
+
+
+def test_options_reject_unknown_diarization() -> None:
+    with pytest.raises(InvalidOptions, match="diarization"):
+        TranscriptionOptions.from_jsonable({"diarization": "nemo"})
+
+
+def test_options_reject_unknown_polish() -> None:
+    with pytest.raises(InvalidOptions, match="polish"):
+        TranscriptionOptions.from_jsonable({"polish": "openai"})
+
+
+def test_options_reject_non_bool_polish_full() -> None:
+    with pytest.raises(InvalidOptions, match="polish_full_transcript"):
+        TranscriptionOptions.from_jsonable({"polish_full_transcript": "true"})
+
+
+def test_options_missing_stage_fields_get_defaults() -> None:
+    """Old persisted JSON without stage fields must deserialise without error."""
+    from lecture_transcriber.domain.enums import ASREngineChoice, DiarizationBackend, PolishBackend
+
+    opts = TranscriptionOptions.from_jsonable({"language": "ru", "beam_size": 3})
+    assert opts.engine == ASREngineChoice.AUTO
+    assert opts.diarization == DiarizationBackend.OFF
+    assert opts.polish == PolishBackend.OFF
+
+
+# ---------------------------------------------------------------------------
+# New value objects: WordTiming, DiarizationTurn, PolishResult, EditorRevision
+# ---------------------------------------------------------------------------
+
+
+def test_word_timing_validates_timestamps() -> None:
+    from lecture_transcriber.domain.models import WordTiming
+
+    with pytest.raises(ValueError, match="end must be greater"):
+        WordTiming(word="hello", start=2.0, end=1.0)
+
+    with pytest.raises(ValueError, match="word must not be empty"):
+        WordTiming(word="", start=0.0, end=1.0)
+
+
+def test_word_timing_probability_range() -> None:
+    from lecture_transcriber.domain.models import WordTiming
+
+    with pytest.raises(ValueError, match="probability"):
+        WordTiming(word="x", start=0.0, end=1.0, probability=1.5)
+
+
+def test_diarization_turn_validates_timestamps() -> None:
+    from lecture_transcriber.domain.models import DiarizationTurn
+
+    with pytest.raises(ValueError, match="end must be greater"):
+        DiarizationTurn(speaker_id="SPEAKER_00", start=5.0, end=3.0)
+
+    with pytest.raises(ValueError, match="speaker_id must not be empty"):
+        DiarizationTurn(speaker_id="", start=0.0, end=1.0)
+
+
+def test_polish_result_requires_text_when_changed() -> None:
+    from lecture_transcriber.domain.models import PolishResult
+
+    with pytest.raises(ValueError, match="polished_text"):
+        PolishResult(segment_index=0, polished_text=None, changed=True)
+
+    # unchanged with no text is valid
+    result = PolishResult(segment_index=0, polished_text=None, changed=False)
+    assert result.changed is False
+
+
+def test_editor_revision_requires_non_empty_text() -> None:
+    from datetime import UTC, datetime
+    from lecture_transcriber.domain.models import EditorRevision
+
+    with pytest.raises(ValueError, match="revised_text must not be empty"):
+        EditorRevision(
+            segment_index=0,
+            revised_text="",
+            revised_at=datetime.now(UTC),
+        )
+
+
+# ---------------------------------------------------------------------------
+# DIARIZING / POLISHING status transitions
+# ---------------------------------------------------------------------------
+
+
+def test_exporting_can_transition_to_diarizing() -> None:
+    from lecture_transcriber.domain.enums import JobStatus
+
+    job = _queued_job()
+    for s in (
+        JobStatus.PROBING,
+        JobStatus.LOADING_MODEL,
+        JobStatus.TRANSCRIBING,
+        JobStatus.VALIDATING,
+        JobStatus.EXPORTING,
+        JobStatus.DIARIZING,
+    ):
+        job.transition_to(s)
+    assert job.status == JobStatus.DIARIZING
+
+
+def test_diarizing_can_transition_to_polishing_then_completed() -> None:
+    from lecture_transcriber.domain.enums import JobStatus
+
+    job = _queued_job()
+    for s in (
+        JobStatus.PROBING,
+        JobStatus.LOADING_MODEL,
+        JobStatus.TRANSCRIBING,
+        JobStatus.VALIDATING,
+        JobStatus.EXPORTING,
+        JobStatus.DIARIZING,
+        JobStatus.POLISHING,
+        JobStatus.COMPLETED,
+    ):
+        job.transition_to(s)
+    assert job.is_terminal()
+
+
+def test_exporting_can_skip_to_polishing() -> None:
+    from lecture_transcriber.domain.enums import JobStatus
+
+    job = _queued_job()
+    for s in (
+        JobStatus.PROBING,
+        JobStatus.LOADING_MODEL,
+        JobStatus.TRANSCRIBING,
+        JobStatus.VALIDATING,
+        JobStatus.EXPORTING,
+        JobStatus.POLISHING,
+        JobStatus.COMPLETED,
+    ):
+        job.transition_to(s)
+    assert job.is_terminal()
+
+
+# ---------------------------------------------------------------------------
+# Ports expose new protocol classes
+# ---------------------------------------------------------------------------
+
+
+def test_ports_module_exposes_diarization_and_polish_protocols() -> None:
+    from lecture_transcriber.domain import ports
+
+    assert hasattr(ports, "DiarizationEngine")
+    assert hasattr(ports, "PolishEngine")
+    assert hasattr(ports, "DiarizationResult")
+    assert hasattr(ports, "PolishRequest")
