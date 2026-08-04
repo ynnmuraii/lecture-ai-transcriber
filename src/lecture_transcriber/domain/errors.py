@@ -41,6 +41,24 @@ class AsrFailed(DomainError):
     """Raised when the ASR engine reports a fatal transcription error."""
 
 
+class DiarizationFailed(DomainError):
+    """Raised when the diarization engine reports a fatal error.
+
+    Because diarization is an optional stage, callers SHOULD catch this,
+    record a ``WarningCode.DIARIZATION_FAILED`` warning, and complete the job
+    with ``COMPLETED_WITH_WARNINGS`` rather than propagating the failure.
+    """
+
+
+class PolishFailed(DomainError):
+    """Raised when the polish engine reports a fatal error.
+
+    Polishing is optional; callers SHOULD catch this, record a
+    ``WarningCode.POLISH_FAILED`` warning, and preserve the raw canonical
+    transcript rather than propagating the failure.
+    """
+
+
 class ExportFailed(DomainError):
     """Raised when the canonical JSON or any deterministic exporter cannot be built."""
 
