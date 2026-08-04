@@ -13,7 +13,7 @@ runs on your machine — no cloud, no telemetry, no hidden uploads.
   container.
 
 The 2.0 rewrite is a clean break from the 1.x pipeline. See
-[`decisions/`](decisions/) for the architecture decision records.
+[`docs/README.md`](docs/README.md) for the architecture and research roadmap.
 
 ## Requirements
 
