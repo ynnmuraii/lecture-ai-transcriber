@@ -372,6 +372,7 @@ def test_canonical_json_preserves_verbatim_text() -> None:
     assert data["segments"][0]["text"] == "  спасибо за просмотр  "
     assert data["transcript_kind"] == "raw_canonical"
     assert data["segments"][0]["words"] == []
+    assert "speaker_id" not in data["segments"][0]
     assert data["segments"][0]["id"]
 
 

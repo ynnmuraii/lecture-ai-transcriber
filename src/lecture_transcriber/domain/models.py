@@ -314,19 +314,16 @@ class LanguageMetadata:
 
 @dataclass(frozen=True)
 class WordTiming:
-    """One word returned by the ASR engine with per-word timestamps.
+    """One raw word returned by the ASR engine with per-word timestamps.
 
-    These are **raw ASR outputs** and must never be modified by diarization or
-    polishing.  Speaker assignment (``speaker_id``) is added by the diarization
-    stage and is ``None`` when diarization is disabled or the word falls in an
-    ambiguous gap between two speaker turns.
+    Speaker assignment is a separate derived projection and must never be
+    stored on this raw value object.
     """
 
     word: str
     start: float
     end: float
     probability: float | None = None
-    speaker_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.word:
@@ -452,11 +449,8 @@ class TranscriptSegment:
 
     The text is preserved exactly as the engine returned it (apart from a
     single outer-whitespace strip in the canonical exporter). The application
-    must not rewrite, merge or drop segments.
-
-    ``speaker_id`` is set by the diarization stage; it is ``None`` when
-    diarization is disabled or the segment timestamp falls in an ambiguous
-    gap.  It is informational and **must not** influence the raw text.
+    must not rewrite, merge or drop segments. Speaker and polish projections
+    reference this raw segment without changing it.
     """
 
     index: int
