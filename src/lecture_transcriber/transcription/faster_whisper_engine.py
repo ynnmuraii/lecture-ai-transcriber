@@ -28,6 +28,7 @@ from lecture_transcriber.domain.models import (
     LanguageMetadata,
     TranscriptionOptions,
     TranscriptSegment,
+    TranscriptWord,
 )
 from lecture_transcriber.domain.ports import (
     ASREngine,
@@ -89,11 +90,26 @@ def _to_domain_segment(
     """
     raw_text = getattr(sdk_segment, "text", "") or ""
     text = raw_text.strip()
+    words = tuple(
+        TranscriptWord(
+            index=i,
+            start=float(getattr(word, "start", 0.0)),
+            end=float(getattr(word, "end", 0.0)),
+            text=str(getattr(word, "word", "") or "").strip(),
+            probability=(
+                float(probability)
+                if (probability := getattr(word, "probability", None)) is not None
+                else None
+            ),
+        )
+        for i, word in enumerate(getattr(sdk_segment, "words", None) or ())
+    )
     return TranscriptSegment(
         index=index,
         start=float(getattr(sdk_segment, "start", 0.0)),
         end=float(getattr(sdk_segment, "end", 0.0)),
         text=text,
+        words=words,
         avg_logprob=getattr(sdk_segment, "avg_logprob", None),
         compression_ratio=getattr(sdk_segment, "compression_ratio", None),
         no_speech_prob=getattr(sdk_segment, "no_speech_prob", None),
@@ -193,7 +209,7 @@ class FasterWhisperEngine(ASREngine):
                 condition_on_previous_text=options.condition_on_previous_text,
                 vad_filter=options.vad_enabled,
                 vad_parameters=vad_parameters,
-                word_timestamps=False,
+                word_timestamps=True,
                 hotwords=options.hotwords,
             )
         except Exception as exc:  # pragma: no cover - mapped to domain error
