@@ -393,6 +393,55 @@ def test_status_endpoint_reports_terminal_state(client: TestClient, tmp_path: Pa
     assert formats == {"json", "txt", "srt", "vtt"}
 
 
+def test_web_canonical_json_artifact_exposes_v2(
+    client: TestClient, tmp_path: Path
+) -> None:
+    wav = tmp_path / "v2.wav"
+    _silence_wav(wav)
+    up = client.post(
+        "/api/media",
+        files={"file": ("v2.wav", wav.open("rb"), "audio/wav")},
+    )
+    media_id = up.json()["media"]["id"]
+    r = client.post(
+        "/api/jobs",
+        content=json.dumps({"media_id": media_id}),
+        headers={"content-type": "application/json"},
+    )
+    job_id = r.json()["id"]
+    detail = _wait_for_status(client, job_id, JobStatus.COMPLETED)
+    # All four artifact formats are produced.
+    formats = {a["format"] for a in detail["artifacts"]}
+    assert formats == {"json", "txt", "srt", "vtt"}
+    # The canonical v2 JSON artifact is downloadable through /api/artifacts
+    # and exposes the raw_canonical contract without touching the API DTOs.
+    json_art = next(a for a in detail["artifacts"] if a["format"] == "json")
+    rr = client.get(f"/api/artifacts/{json_art['id']}")
+    assert rr.status_code == 200
+    canonical = rr.json()
+    assert canonical["schema_version"] == "2.0"
+    assert canonical["transcript_kind"] == "raw_canonical"
+    first_segment = canonical["segments"][0]
+    assert "id" in first_segment
+    assert isinstance(first_segment["words"], list)
+    # The fake ASR engine emits no word timestamps, so words is empty.
+    assert first_segment["words"] == []
+
+
+def test_web_job_creation_has_no_new_options(client: TestClient) -> None:
+    # The create-job request contract stays exactly {media_id, language,
+    # model_override}; Stage C owns engine/stage/word options, so none of
+    # them may appear in the API schema yet.
+    schema = client.app.openapi()
+    create_op = schema["paths"]["/api/jobs"]["post"]
+    ref = create_op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    ref_name = ref.rsplit("/", 1)[-1]
+    props = schema["components"]["schemas"][ref_name]["properties"]
+    assert {"language", "model_override"} <= set(props)
+    for forbidden in ("word_timestamps", "engine", "diarize", "polish"):
+        assert forbidden not in props
+
+
 def test_cancel_is_idempotent_on_terminal_job(
     client: TestClient, tmp_path: Path
 ) -> None:

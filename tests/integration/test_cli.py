@@ -231,6 +231,33 @@ def test_transcribe_runs_to_completion(env, tmp_path: Path) -> None:
     assert len(paths) == 4
     formats = {p.rsplit(".", 1)[-1] for p in paths}
     assert formats == {"json", "txt", "srt", "vtt"}
+    # The canonical v2 JSON artifact is published first and exposes the
+    # raw_canonical contract without any new CLI option.
+    json_path = next(p for p in paths if p.endswith("transcript.json"))
+    canonical = json.loads((env.data_dir / json_path).read_text(encoding="utf-8"))
+    assert canonical["schema_version"] == "2.0"
+    assert canonical["transcript_kind"] == "raw_canonical"
+    first_segment = canonical["segments"][0]
+    assert "id" in first_segment
+    assert isinstance(first_segment["words"], list)
+    # The fake ASR engine emits no word timestamps, so words is empty.
+    assert first_segment["words"] == []
+
+
+def test_no_new_options_or_benchmark_command(env) -> None:
+    runner = CliRunner()
+    root = runner.invoke(app, ["--help"])
+    assert root.exit_code == 0
+    # The removed `benchmark` command stays absent.
+    assert "benchmark" not in root.stdout
+    # The transcribe command keeps its existing options only; Stage C owns
+    # engine/stage/word options, so none of them may appear here yet.
+    transcribe_help = runner.invoke(app, ["transcribe", "--help"])
+    assert transcribe_help.exit_code == 0
+    for existing in ("--language", "--wait", "--json"):
+        assert existing in transcribe_help.stdout
+    for forbidden in ("--word-timestamps", "--engine", "--diarize", "--polish"):
+        assert forbidden not in transcribe_help.stdout
 
 
 def test_invalid_job_id_returns_nonzero(env) -> None:
