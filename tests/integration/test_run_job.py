@@ -18,7 +18,12 @@ from lecture_transcriber.application.services.export_transcript import (
 from lecture_transcriber.application.services.get_job import GetJobService
 from lecture_transcriber.application.services.run_job import RunJobService
 from lecture_transcriber.domain.enums import ErrorCode, JobStatus
-from lecture_transcriber.domain.errors import AsrFailed, JobLeaseLost, MediaProbeFailed
+from lecture_transcriber.domain.errors import (
+    AsrFailed,
+    ExportFailed,
+    JobLeaseLost,
+    MediaProbeFailed,
+)
 from lecture_transcriber.domain.models import (
     HardwareFacts,
     HardwareProfile,
@@ -70,17 +75,6 @@ class _StaticProbe(MediaProbe):
             audio_sample_rate=48000,
             audio_channels=2,
         )
-
-
-class _BoomEngine(ASREngine):
-    def prepare(self, profile, options, is_cancelled):  # type: ignore[no-untyped-def]
-        return None
-
-    def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
-        raise AsrFailed("engine boom")
-
-    def close(self):  # type: ignore[no-untyped-def]
-        return None
 
 
 class _FailingProbe(MediaProbe):
@@ -166,6 +160,7 @@ def _build_run(
     *,
     engine: ASREngine,
     probe: MediaProbe | None = None,
+    exporter: ExportTranscriptService | None = None,
 ) -> RunJobService:
     return RunJobService(
         job_repo=stack["job_repo"],
@@ -173,7 +168,7 @@ def _build_run(
         file_store=stack["file_store"],
         probe=probe or _StaticProbe(duration=10.0),
         engine=engine,
-        exporter=stack["exporter"],
+        exporter=exporter or stack["exporter"],
         clock=SystemClock(),
     )
 
@@ -205,6 +200,16 @@ def test_successful_run_writes_four_artifacts_and_completes(stack) -> None:
     assert job.error_code is None
     artifacts = stack["artifact_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
     assert {a.format for a in artifacts} == {"json", "txt", "srt", "vtt"}
+    assert engine.closed is True
+    payload = json.loads(
+        stack["file_store"]  # type: ignore[attr-defined]
+        .resolve_artifact(
+            next(a.relative_path for a in artifacts if a.format == "json")
+        )
+        .read_text(encoding="utf-8")
+    )
+    assert payload["schema_version"] == "2.0"
+    assert payload["transcript_kind"] == "raw_canonical"
     events = stack["event_repo"].list_for_job(summary.id)  # type: ignore[attr-defined]
     statuses = [e.status for e in events]
     # queued → probing → loading_model → transcribing → validating → exporting → completed
@@ -343,7 +348,7 @@ def test_empty_transcription_fails_without_artifacts(stack) -> None:
     assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
 
 
-def test_completion_database_failure_removes_all_exported_files(stack) -> None:
+def test_completion_database_failure_retains_raw_first_files(stack) -> None:
     media: Media = stack["media"]
     summary = _build_create(stack).create(media.id, TranscriptionOptions())
     job_repo = stack["job_repo"]
@@ -358,9 +363,45 @@ def test_completion_database_failure_removes_all_exported_files(stack) -> None:
     job = job_repo.get(summary.id)  # type: ignore[attr-defined]
     assert job is not None
     assert job.status == JobStatus.FAILED
+    # Artifact DB registration is only claimed on successful completion; the
+    # raw-first files must survive a completion-persistence failure.
     assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
     settings: Settings = stack["settings"]  # type: ignore[assignment]
-    assert not (settings.jobs_dir / str(summary.id)).exists()
+    raw_json = settings.jobs_dir / str(summary.id) / "transcript.json"
+    assert raw_json.exists()
+    payload = json.loads(raw_json.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "2.0"
+    assert payload["transcript_kind"] == "raw_canonical"
+
+
+def test_export_failure_after_json_keeps_raw_json(stack) -> None:
+    media: Media = stack["media"]
+    summary = _build_create(stack).create(media.id, TranscriptionOptions())
+
+    class _FailingTxtExporter(ExportTranscriptService):
+        def export(self, job_id, fmt, transcript):  # type: ignore[no-untyped-def]
+            if fmt == "txt":
+                raise ExportFailed("txt export failed")
+            return super().export(job_id, fmt, transcript)
+
+    exporter = _FailingTxtExporter(stack["file_store"])  # type: ignore[arg-type]
+    run = _build_run(stack, engine=FakeASREngine(), exporter=exporter)
+
+    run.run_job(summary.id)
+
+    job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == ErrorCode.EXPORT_FAILED.value
+    # Raw-first JSON is committed before the TXT failure and must survive.
+    settings: Settings = stack["settings"]  # type: ignore[assignment]
+    raw_json = settings.jobs_dir / str(summary.id) / "transcript.json"
+    assert raw_json.exists()
+    payload = json.loads(raw_json.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "2.0"
+    assert payload["transcript_kind"] == "raw_canonical"
+    # Incomplete derived exports are not registered in the artifact DB.
+    assert stack["artifact_repo"].list_for_job(summary.id) == ()  # type: ignore[attr-defined]
 
 
 def test_asr_failure_records_stable_error_code(stack) -> None:
@@ -368,7 +409,12 @@ def test_asr_failure_records_stable_error_code(stack) -> None:
     create = _build_create(stack)
     summary = create.create(media.id, TranscriptionOptions())
 
-    run = _build_run(stack, engine=_BoomEngine())
+    class _BoomingFakeEngine(FakeASREngine):
+        def transcribe(self, media_path, options, on_segment, is_cancelled):  # type: ignore[no-untyped-def]
+            raise AsrFailed("engine boom")
+
+    engine = _BoomingFakeEngine()
+    run = _build_run(stack, engine=engine)
     run.run_job(summary.id)
 
     job = stack["job_repo"].get(summary.id)  # type: ignore[attr-defined]
@@ -376,12 +422,14 @@ def test_asr_failure_records_stable_error_code(stack) -> None:
     assert job.status == JobStatus.FAILED
     assert job.error_code == ErrorCode.ASR_FAILED.value
     assert "engine boom" in (job.error_message or "")
+    assert engine.closed is True
 
 
 def test_probe_failure_uses_media_probe_error_code(stack) -> None:
     media: Media = stack["media"]
     summary = _build_create(stack).create(media.id, TranscriptionOptions())
-    run = _build_run(stack, engine=FakeASREngine(), probe=_FailingProbe())
+    engine = FakeASREngine()
+    run = _build_run(stack, engine=engine, probe=_FailingProbe())
 
     run.run_job(summary.id)
 
@@ -389,6 +437,7 @@ def test_probe_failure_uses_media_probe_error_code(stack) -> None:
     assert job is not None
     assert job.status == JobStatus.FAILED
     assert job.error_code == ErrorCode.MEDIA_PROBE_FAILED.value
+    assert engine.closed is True
 
 
 def test_changed_media_is_rejected_before_asr(stack) -> None:

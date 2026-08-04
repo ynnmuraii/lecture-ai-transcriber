@@ -51,13 +51,12 @@ class ExportTranscriptService:
         job_id: UUID,
         transcript: Transcript,
     ) -> tuple[StoredArtifact, ...]:
-        contents: dict[str, bytes] = {}
-        for fmt, formatter in _FORMATTERS.items():
-            content = formatter(transcript)
-            contents[f"transcript.{fmt}"] = (
-                content.encode("utf-8") if isinstance(content, str) else content
-            )
-        return self._file_store.write_artifacts_atomic(job_id, contents)
+        # Publish the canonical raw JSON first so it is physically committed
+        # before any derived format (TXT/SRT/VTT) is written. If a later
+        # export fails, the raw provenance is preserved on disk.
+        formats = ("json", "txt", "srt", "vtt")
+        stored = [self.export(job_id, fmt, transcript) for fmt in formats]
+        return tuple(stored)
 
 
 __all__ = ["ExportTranscriptService"]

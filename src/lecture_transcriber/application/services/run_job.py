@@ -142,16 +142,16 @@ class RunJobService:
         job = self._job_repo.get(job_id)
         if job is None:
             return
-        media = self._media_repo.get(job.media_id)
-        if media is None:
-            self._fail_with(
-                job_id,
-                ErrorCode.MEDIA_PROBE_FAILED,
-                "media row missing for claimed job",
-            )
-            return
-
         try:
+            media = self._media_repo.get(job.media_id)
+            if media is None:
+                self._fail_with(
+                    job_id,
+                    ErrorCode.MEDIA_PROBE_FAILED,
+                    "media row missing for claimed job",
+                )
+                return
+
             self._step_loading_model(
                 job_id,
                 media,
@@ -175,7 +175,8 @@ class RunJobService:
                 lease_lost,
             )
             transcript = Transcript(
-                schema_version="1.0",
+                schema_version="2.0",
+                transcript_kind="raw_canonical",
                 job_id=job_id,
                 media=media,
                 engine=result_engine,
@@ -200,6 +201,10 @@ class RunJobService:
             self._fail_with(job_id, ErrorCode.MODEL_LOAD_FAILED, str(exc))
         except Exception as exc:  # last-resort safety net
             self._fail_with(job_id, ErrorCode.INTERNAL_ERROR, str(exc))
+        finally:
+            # Always release the ASR engine after a pipeline attempt, whether
+            # it succeeded, was cancelled, or failed at any stage.
+            self._engine.close()
 
     # ----------------------------------------------------------------- steps
 
@@ -355,17 +360,13 @@ class RunJobService:
             message=None,
             error_code=None,
         )
-        try:
-            self._raise_if_stopped(job_id, worker_id, lease_lost)
-            self._job_repo.complete_with_artifacts(
-                job_id,
-                terminal,
-                tuple(item.artifact for item in stored),
-                completion_event,
-            )
-        except Exception:
-            self._file_store.delete_job_artifacts(job_id)
-            raise
+        self._raise_if_stopped(job_id, worker_id, lease_lost)
+        self._job_repo.complete_with_artifacts(
+            job_id,
+            terminal,
+            tuple(item.artifact for item in stored),
+            completion_event,
+        )
 
     # -------------------------------------------------------------- internals
 
