@@ -13,7 +13,7 @@ import string
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from lecture_transcriber.domain.enums import (
     ALLOWED_TRANSITIONS,
@@ -245,6 +245,35 @@ class LanguageMetadata:
 
 
 @dataclass(frozen=True)
+class TranscriptWord:
+    """One word-level transcription unit within a segment.
+
+    Word timestamps are the foundation for deterministic speaker assignment
+    and word-level derived exports. Containment in a segment and cross-word
+    chronological order are validated by the upstream validator, not here.
+    """
+
+    index: int
+    start: float
+    end: float
+    text: str
+    probability: float | None = None
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int("index", self.index)
+        _require_finite("start", self.start)
+        _require_finite("end", self.end)
+        if self.start < 0:
+            raise ValueError("start must be non-negative")
+        if self.end <= self.start:
+            raise ValueError("end must be greater than start")
+        if self.probability is not None:
+            _require_finite("probability", self.probability)
+            if not 0.0 <= self.probability <= 1.0:
+                raise ValueError("probability must be in [0.0, 1.0]")
+
+
+@dataclass(frozen=True)
 class TranscriptSegment:
     """One verbatim ASR segment.
 
@@ -263,6 +292,7 @@ class TranscriptSegment:
     temperature: float | None = None
     needs_review: bool = False
     review_reasons: tuple[str, ...] = ()
+    words: tuple[TranscriptWord, ...] = ()
 
     def __post_init__(self) -> None:
         _require_non_negative_int("index", self.index)
@@ -281,6 +311,12 @@ class TranscriptSegment:
             _require_optional_finite(name, value)
         if self.no_speech_prob is not None and not 0.0 <= self.no_speech_prob <= 1.0:
             raise ValueError("no_speech_prob must be in [0.0, 1.0]")
+        word_indexes = tuple(word.index for word in self.words)
+        if word_indexes != tuple(sorted(word_indexes)):
+            raise ValueError("words must be in chronological order")
+        word_starts = tuple(word.start for word in self.words)
+        if word_starts != tuple(sorted(word_starts)):
+            raise ValueError("words must be in chronological order")
 
 
 @dataclass(frozen=True)
@@ -305,8 +341,11 @@ class Transcript:
     warnings: tuple[TranscriptWarning, ...]
     source_duration_seconds: float
     vad_duration_seconds: float | None
+    transcript_kind: str = "raw_canonical"
 
     def __post_init__(self) -> None:
+        if self.transcript_kind != "raw_canonical":
+            raise ValueError("transcript_kind must be 'raw_canonical'")
         _require_finite("source_duration_seconds", self.source_duration_seconds)
         if self.source_duration_seconds < 0:
             raise ValueError("source_duration_seconds must be non-negative")
@@ -324,6 +363,7 @@ class Transcript:
         """Produce a stable, JSON-serialisable dict for canonical output."""
         return {
             "schema_version": self.schema_version,
+            "transcript_kind": self.transcript_kind,
             "job_id": str(self.job_id),
             "media": {
                 "id": str(self.media.id),
@@ -350,6 +390,7 @@ class Transcript:
             "vad_duration_seconds": self.vad_duration_seconds,
             "segments": [
                 {
+                    "id": str(uuid5(self.job_id, f"segment:{seg.index}")),
                     "index": seg.index,
                     "start": round(float(seg.start), 3),
                     "end": round(float(seg.end), 3),
@@ -360,6 +401,16 @@ class Transcript:
                     "temperature": seg.temperature,
                     "needs_review": seg.needs_review,
                     "review_reasons": list(seg.review_reasons),
+                    "words": [
+                        {
+                            "index": word.index,
+                            "start": round(float(word.start), 3),
+                            "end": round(float(word.end), 3),
+                            "text": word.text,
+                            "probability": word.probability,
+                        }
+                        for word in seg.words
+                    ],
                 }
                 for seg in self.segments
             ],
