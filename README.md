@@ -143,10 +143,6 @@ ruff check src tests
 mypy src/lecture_transcriber
 ```
 
-The benchmark harness (`lecture-transcriber benchmark …`) lives in
-[`benchmarks/`](benchmarks/) and is opt-in — see
-[`benchmarks/README.md`](benchmarks/README.md) for the manifest format.
-
 ## Continuous integration
 
 Every push and pull request to `main` or `dev` runs the same checks
