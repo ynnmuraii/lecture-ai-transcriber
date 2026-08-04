@@ -28,16 +28,15 @@ RAM_BAND_BALANCED_MAX = 16 * _GIB
 VRAM_BAND_LOW_MAX = 4 * _GIB
 VRAM_BAND_BALANCED_MAX = 8 * _GIB
 
-# GigaAM model names per VRAM band (220M ctc / large_ctc / large_ctc).
 _GIGAAM_CUDA_MODELS: dict[str, str] = {
-    "low": "GigaAM-Multilingual-ctc",          # 220M, fits <4 GiB
-    "balanced": "GigaAM-v3-e2e-rnnt",          # provisional RU default
-    "quality": "GigaAM-Multilingual-large-ctc", # 600M, needs >8 GiB
+    "low": "multilingual_ctc",
+    "balanced": "v3_e2e_rnnt",
+    "quality": "multilingual_large_ctc",
 }
 _GIGAAM_CPU_MODELS: dict[str, str] = {
-    "low": "GigaAM-Multilingual-ctc",
-    "balanced": "GigaAM-Multilingual-ctc",
-    "quality": "GigaAM-v3-e2e-rnnt",
+    "low": "multilingual_ctc",
+    "balanced": "multilingual_ctc",
+    "quality": "v3_e2e_rnnt",
 }
 
 
