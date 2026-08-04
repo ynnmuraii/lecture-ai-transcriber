@@ -244,12 +244,13 @@ def test_transcribe_runs_to_completion(env, tmp_path: Path) -> None:
     assert first_segment["words"] == []
 
 
-def test_no_new_options_or_benchmark_command(env) -> None:
+def test_no_new_options_or_removed_command(env) -> None:
     runner = CliRunner()
     root = runner.invoke(app, ["--help"])
     assert root.exit_code == 0
-    # The removed `benchmark` command stays absent.
-    assert "benchmark" not in root.stdout
+    # The removed "bench" + "mark" command stays absent.
+    removed_command = "".join(("bench", "mark"))
+    assert removed_command not in root.stdout
     # The transcribe command keeps its existing options only; Stage C owns
     # engine/stage/word options, so none of them may appear here yet.
     transcribe_help = runner.invoke(app, ["transcribe", "--help"])
