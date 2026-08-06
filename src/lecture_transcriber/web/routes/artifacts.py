@@ -14,6 +14,14 @@ from lecture_transcriber.web.schemas import ErrorBody, ErrorEnvelope
 
 router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
 
+# Projection/exports whose on-disk filename is not ``transcript.<format>``.
+_ARTIFACT_FILENAMES = {
+    "speaker": "speaker.json",
+    "speaker_txt": "speaker.txt",
+    "polished": "polished.json",
+    "editor": "editor.json",
+}
+
 
 def _envelope(status_code: int, code: str, message: str) -> JSONResponse:
     body = ErrorEnvelope(error=ErrorBody(code=code, message=message))
@@ -43,7 +51,7 @@ def download_artifact(
                         continue
                     return FileResponse(
                         path=path,
-                        filename=f"transcript.{a.format}",
+                        filename=_ARTIFACT_FILENAMES.get(a.format, f"transcript.{a.format}"),
                         media_type="text/plain; charset=utf-8",
                     )
     return _envelope(404, "ARTIFACT_NOT_FOUND", f"no artifact with id {artifact_id}")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request
 
+from lecture_transcriber.application.editor import EditorService
 from lecture_transcriber.application.services.cancel_job import CancelJobService
 from lecture_transcriber.application.services.create_job import CreateJobService
 from lecture_transcriber.application.services.export_transcript import (
@@ -45,6 +46,14 @@ def get_get_job(
     return container.get_job
 
 
+def get_editor(
+    container: ApplicationContainer = Depends(get_container),
+) -> EditorService:
+    if container.editor is None:
+        raise HTTPException(status_code=503, detail="editor is not configured")
+    return container.editor
+
+
 def get_cancel_job(
     container: ApplicationContainer = Depends(get_container),
 ) -> CancelJobService:
@@ -73,6 +82,7 @@ __all__ = [
     "get_cancel_job",
     "get_container",
     "get_create_job",
+    "get_editor",
     "get_exporter",
     "get_file_store",
     "get_get_job",

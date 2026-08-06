@@ -277,6 +277,9 @@ def test_one_failed_job_does_not_kill_the_loop(stack) -> None:
                 raise AsrFailed("boom")
             return FakeASREngine().transcribe(media_path, options, on_segment, is_cancelled)
 
+        def close(self):  # type: ignore[no-untyped-def]
+            return None
+
     # Pre-cancel the first job so the worker sees a cancel mid-run.
     stack["job_repo"].request_cancel(failing_summary.id)  # type: ignore[attr-defined]
     worker = _build_worker(stack, engine=FakeASREngine())

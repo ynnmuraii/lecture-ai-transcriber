@@ -6,12 +6,60 @@
   <form id="upload-form">
     <label for="file">Media file</label>
     <input id="file" name="file" type="file" accept="audio/*,video/*" required>
-    <label for="language">Language (optional, ISO code)</label>
-    <input id="language" name="language" type="text" maxlength="16" placeholder="ru">
-    <label for="model">Model override (optional)</label>
-    <select id="model" name="model">
-      <option value="">auto</option>
-    </select>
+    <div class="form-grid">
+      <div>
+        <label for="language">Language (optional, ISO code)</label>
+        <input id="language" name="language" type="text" maxlength="16" placeholder="ru">
+      </div>
+      <div>
+        <label for="engine">ASR engine</label>
+        <select id="engine" name="engine">
+          <option value="auto">auto (faster-whisper)</option>
+          <option value="faster-whisper">faster-whisper</option>
+          <option value="gigaam">gigaam</option>
+        </select>
+      </div>
+      <div>
+        <label for="model">Model override (optional)</label>
+        <select id="model" name="model">
+          <option value="">auto</option>
+        </select>
+      </div>
+    </div>
+    <fieldset class="stage-options">
+      <legend>Optional stages</legend>
+      <div class="form-grid">
+        <div>
+          <label for="diarization">Speaker diarization</label>
+          <select id="diarization" name="diarization">
+            <option value="off">off</option>
+            <option value="pyannote">pyannote community-1</option>
+          </select>
+        </div>
+        <div>
+          <label for="polish">Derived polish</label>
+          <select id="polish" name="polish">
+            <option value="off">off</option>
+            <option value="ollama">local Ollama</option>
+          </select>
+        </div>
+        <div>
+          <label for="polish_model">Polish model tag</label>
+          <input
+            id="polish_model"
+            name="polish_model"
+            type="text"
+            maxlength="128"
+            placeholder="t-tech/T-lite-it-2.1:q4_k_m"
+            disabled
+          >
+        </div>
+      </div>
+      <label class="check-row" for="polish_full_transcript">
+        <input id="polish_full_transcript" name="polish_full_transcript" type="checkbox" disabled>
+        Polish the full transcript (otherwise review flags only)
+      </label>
+    </fieldset>
     <button type="submit">Upload &amp; create job</button>
   </form>
   <p id="upload-status" class="status"></p>

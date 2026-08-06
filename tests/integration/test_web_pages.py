@@ -179,6 +179,20 @@ def test_index_page_renders(client: TestClient) -> None:
     assert "/static/app.js" in r.text
 
 
+def test_index_page_exposes_stage_selection_controls(client: TestClient) -> None:
+    response = client.get("/")
+
+    assert response.status_code == 200
+    for field in (
+        'name="engine"',
+        'name="diarization"',
+        'name="polish"',
+        'name="polish_model"',
+        'name="polish_full_transcript"',
+    ):
+        assert field in response.text
+
+
 def test_system_page_renders(client: TestClient) -> None:
     r = client.get("/system")
     assert r.status_code == 200
@@ -201,9 +215,7 @@ def test_job_page_404_for_unknown_job(client: TestClient) -> None:
     assert body["error"]["code"] == "JOB_NOT_FOUND"
 
 
-def test_job_page_renders_after_job_completes(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_job_page_renders_after_job_completes(client: TestClient, tmp_path: Path) -> None:
     wav = tmp_path / "u.wav"
     _silence_wav(wav)
     up = client.post(

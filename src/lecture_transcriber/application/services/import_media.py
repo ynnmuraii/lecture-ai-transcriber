@@ -22,8 +22,16 @@ from lecture_transcriber.domain.ports import (
 )
 
 _SUPPORTED_EXTENSIONS = {
-    ".mp4", ".mkv", ".webm", ".mov", ".avi",
-    ".mp3", ".wav", ".m4a", ".flac", ".ogg",
+    ".mp4",
+    ".mkv",
+    ".webm",
+    ".mov",
+    ".avi",
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".flac",
+    ".ogg",
 }
 
 
@@ -73,9 +81,7 @@ class ImportMediaService:
     ) -> Media:
         suffix = _ext_of(original_name)
         if suffix not in _SUPPORTED_EXTENSIONS:
-            raise UnsupportedFormat(
-                f"extension {suffix or '<none>'} is not in the supported set"
-            )
+            raise UnsupportedFormat(f"extension {suffix or '<none>'} is not in the supported set")
 
         stored: StoredMedia
         try:

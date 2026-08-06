@@ -110,10 +110,19 @@ def test_import_happy_path_stores_metadata() -> None:
 
 
 def test_import_rejects_unknown_extension() -> None:
-    service = ImportMediaService(_Store(), _Probe(MediaProbeResult(
-        media_type="audio", duration_seconds=1, audio_codec="x",
-        audio_sample_rate=None, audio_channels=None,
-    )), _Repo())
+    service = ImportMediaService(
+        _Store(),
+        _Probe(
+            MediaProbeResult(
+                media_type="audio",
+                duration_seconds=1,
+                audio_codec="x",
+                audio_sample_rate=None,
+                audio_channels=None,
+            )
+        ),
+        _Repo(),
+    )
 
     with pytest.raises(UnsupportedFormat):
         service.import_stream(BytesIO(b"x"), "lecture.txt", 1024)
@@ -121,10 +130,17 @@ def test_import_rejects_unknown_extension() -> None:
 
 def test_import_propagates_too_large() -> None:
     service = ImportMediaService(
-        _Store(), _Probe(MediaProbeResult(
-            media_type="audio", duration_seconds=1, audio_codec="x",
-            audio_sample_rate=None, audio_channels=None,
-        )), _Repo()
+        _Store(),
+        _Probe(
+            MediaProbeResult(
+                media_type="audio",
+                duration_seconds=1,
+                audio_codec="x",
+                audio_sample_rate=None,
+                audio_channels=None,
+            )
+        ),
+        _Repo(),
     )
 
     with pytest.raises(MediaTooLarge):
@@ -134,9 +150,7 @@ def test_import_propagates_too_large() -> None:
 def test_import_probe_failure_does_not_persist_media() -> None:
     store = _Store()
     repo = _Repo()
-    service = ImportMediaService(
-        store, _Probe(MediaProbeFailed("nope")), repo
-    )
+    service = ImportMediaService(store, _Probe(MediaProbeFailed("nope")), repo)
 
     with pytest.raises(MediaProbeFailed):
         service.import_stream(BytesIO(b"x"), "lecture.mp3", 1024)

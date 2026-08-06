@@ -37,9 +37,7 @@ from lecture_transcriber.transcription.profiles import ProfileSelector
 
 
 def _utcnow(clock: Clock) -> datetime:
-    return clock.now().astimezone(UTC) if clock.now().tzinfo else clock.now().replace(
-        tzinfo=UTC
-    )
+    return clock.now().astimezone(UTC) if clock.now().tzinfo else clock.now().replace(tzinfo=UTC)
 
 
 class CreateJobService:
@@ -79,14 +77,22 @@ class CreateJobService:
         if media is None:
             raise FileNotFoundError(f"media {media_id} is not registered")
 
-        # 3) Resolve the model: explicit override wins, otherwise auto-profile.
+        # 3) Resolve the engine-aware model profile.  AUTO retains the
+        # faster-whisper defaults; explicit GigaAM uses its own model bands.
         facts = self._hardware.detect()
-        profile = self._profiles.select(facts, requested_model=options.model_override)
+        profile = self._profiles.select(
+            facts,
+            requested_model=options.model_override,
+            engine=options.engine,
+        )
         if not self._model_cache.is_available(profile.model):
-            raise ModelNotAvailable(
-                f"model {profile.model!r} is not cached. "
-                f"Run: lecture-transcriber models download {profile.model}"
-            )
+            if options.engine.value == "gigaam":
+                command = (
+                    f"lecture-transcriber models download --engine gigaam --model {profile.model}"
+                )
+            else:
+                command = f"lecture-transcriber models download {profile.model}"
+            raise ModelNotAvailable(f"model {profile.model!r} is not cached. Run: {command}")
 
         # 4) Build the aggregate and append the queued event in lockstep.
         now = _utcnow(self._clock)
@@ -124,6 +130,12 @@ class CreateJobService:
             error_code=job.error_code,
             requested_language=job.requested_language,
             requested_model=job.requested_model,
+            engine=job.options.engine,
+            diarization=job.options.diarization,
+            polish=job.options.polish,
+            polish_model=job.options.polish_model,
+            polish_full_transcript=job.options.polish_full_transcript,
+            effective_model=profile.model,
             profile_name=profile.name,
             created_at=job.created_at,
             started_at=job.started_at,

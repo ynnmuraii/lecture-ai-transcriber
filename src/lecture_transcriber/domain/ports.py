@@ -18,7 +18,8 @@ from lecture_transcriber.domain.enums import JobStatus
 from lecture_transcriber.domain.models import (
     Artifact,
     DiarizationTurn,
-    EditorRevision,
+    EditorDocumentState,
+    EditorEdit,
     EngineMetadata,
     HardwareFacts,
     HardwareProfile,
@@ -40,7 +41,7 @@ __all__ = [
     "Clock",
     "DiarizationEngine",
     "DiarizationResult",
-    "EditorRevision",
+    "EditorRepository",
     "FileStore",
     "HardwareDetectorPort",
     "JobEventRepository",
@@ -190,7 +191,7 @@ class ASREngine(Protocol):
         """Release GPU/CPU resources held by the engine.
 
         Implementations that do not hold persistent resources may implement
-        this as a no-op.  The pipeline calls ``close()`` between stages so
+        this as a no-op. The pipeline calls ``close()`` between stages so
         that the GPU budget is freed before the next heavy runtime is loaded.
         """
         ...
@@ -205,7 +206,7 @@ class ASREngine(Protocol):
 class DiarizationResult:
     """Speaker-turn output from a diarization engine.
 
-    ``turns`` is ordered by start time.  The engine must not include
+    ``turns`` is ordered by start time. The engine must not include
     overlapping turns; the pipeline resolves speaker ambiguity by majority
     overlap with word timestamps.
     """
@@ -229,11 +230,7 @@ class DiarizationEngine(Protocol):
         options: TranscriptionOptions,
         is_cancelled: Callable[[], bool],
     ) -> None:
-        """Load model weights and warm up the runtime.
-
-        Raises :class:`~lecture_transcriber.domain.errors.DiarizationFailed`
-        on unrecoverable errors.  ``is_cancelled`` is polled at safe points.
-        """
+        """Load model weights and warm up the runtime."""
         ...
 
     def diarize(
@@ -242,11 +239,7 @@ class DiarizationEngine(Protocol):
         options: TranscriptionOptions,
         is_cancelled: Callable[[], bool],
     ) -> DiarizationResult:
-        """Run diarization on *media_path* and return ordered speaker turns.
-
-        Raises :class:`~lecture_transcriber.domain.errors.DiarizationFailed`
-        on unrecoverable errors.
-        """
+        """Run diarization and return ordered speaker turns."""
         ...
 
     def close(self) -> None:
@@ -263,10 +256,8 @@ class DiarizationEngine(Protocol):
 class PolishRequest:
     """Input to :meth:`PolishEngine.polish`.
 
-    ``segments`` contains the segments to be polished (either those flagged
-    ``needs_review=True`` or all segments when ``full=True``).
-    ``context_segments`` are adjacent read-only segments provided as context
-    but whose results are discarded.
+    ``segments`` contains the segments to be polished. ``context_segments``
+    are adjacent read-only segments whose results are discarded.
     """
 
     segments: tuple[TranscriptSegment, ...]
@@ -278,12 +269,11 @@ class PolishRequest:
 
 @runtime_checkable
 class PolishEngine(Protocol):
-    """Port for optional AI-polishing adapters (e.g. local Ollama).
+    """Port for optional AI-polishing adapters such as local Ollama.
 
-    Polishing must never modify the raw canonical transcript.  The engine
-    returns one :class:`~lecture_transcriber.domain.models.PolishResult` per
-    input segment in the same order and with matching ``segment_index`` values.
-    On schema mismatch the pipeline logs a warning and keeps the raw text.
+    Polishing never modifies the raw canonical transcript. Returned results
+    stay in the same order and use contiguous ``TranscriptSegment.index``
+    values as their stable positional identity.
     """
 
     def prepare(
@@ -291,11 +281,7 @@ class PolishEngine(Protocol):
         options: TranscriptionOptions,
         is_cancelled: Callable[[], bool],
     ) -> None:
-        """Connect to the backend and verify the requested model is available.
-
-        Raises :class:`~lecture_transcriber.domain.errors.PolishFailed` on
-        unrecoverable errors.
-        """
+        """Connect to the backend and verify the requested model."""
         ...
 
     def polish(
@@ -303,18 +289,11 @@ class PolishEngine(Protocol):
         request: PolishRequest,
         is_cancelled: Callable[[], bool],
     ) -> tuple[PolishResult, ...]:
-        """Return polished results for every segment in *request.segments*.
-
-        The returned tuple MUST have the same length as ``request.segments``
-        and each element's ``segment_index`` must match the corresponding
-        input segment.  Raises :class:`~lecture_transcriber.domain.errors.PolishFailed`
-        on unrecoverable errors; the pipeline will then fall back to the raw text
-        and record a ``WarningCode.POLISH_FAILED`` warning.
-        """
+        """Return one ordered result for every requested segment."""
         ...
 
     def close(self) -> None:
-        """Release any resources held by the engine (connections, loaded models)."""
+        """Release connections or loaded model resources."""
         ...
 
 
@@ -337,14 +316,33 @@ class ArtifactRepository(Protocol):
 
 
 @runtime_checkable
+class EditorRepository(Protocol):
+    """Persistence port for append-only derived editor revisions."""
+
+    def get_or_create(
+        self,
+        job_id: UUID,
+        raw_sha256: str,
+        occurred_at: datetime,
+    ) -> EditorDocumentState: ...
+
+    def append_revision(
+        self,
+        job_id: UUID,
+        raw_sha256: str,
+        base_revision: int,
+        edits: tuple[EditorEdit, ...],
+        occurred_at: datetime,
+    ) -> EditorDocumentState: ...
+
+
+@runtime_checkable
 class JobRepository(Protocol):
     def add(self, job: TranscriptionJob) -> None: ...
     def add_with_event(self, job: TranscriptionJob, event: JobEvent) -> None: ...
     def get(self, job_id: UUID) -> TranscriptionJob | None: ...
     def list_recent(self, limit: int) -> tuple[TranscriptionJob, ...]: ...
-    def claim_next(
-        self, worker_id: str, lease_seconds: int
-    ) -> TranscriptionJob | None: ...
+    def claim_next(self, worker_id: str, lease_seconds: int) -> TranscriptionJob | None: ...
     def claim(
         self,
         job_id: UUID,

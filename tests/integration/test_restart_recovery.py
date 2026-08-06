@@ -166,9 +166,7 @@ def test_expired_lease_is_recovered_and_job_re_runs(stack) -> None:
             update(JobRecord)
             .where(JobRecord.id == str(summary.id))
             .values(
-                lease_expires_at=(
-                    datetime.now(UTC) - timedelta(seconds=10)
-                ).replace(tzinfo=None)
+                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=10)).replace(tzinfo=None)
             )
         )
         session.commit()
@@ -211,9 +209,7 @@ def test_lease_holder_can_extend(stack) -> None:
             update(JobRecord)
             .where(JobRecord.id == str(summary.id))
             .values(
-                lease_expires_at=(
-                    datetime.now(UTC) - timedelta(seconds=1)
-                ).replace(tzinfo=None)
+                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=1)).replace(tzinfo=None)
             )
         )
         session.commit()
@@ -243,9 +239,7 @@ def test_recovery_resets_progress_for_clean_retry(stack) -> None:
             update(JobRecord)
             .where(JobRecord.id == str(summary.id))
             .values(
-                lease_expires_at=(
-                    datetime.now(UTC) - timedelta(seconds=1)
-                ).replace(tzinfo=None)
+                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=1)).replace(tzinfo=None)
             )
         )
         session.commit()
@@ -272,9 +266,7 @@ def test_recovery_finishes_cancel_requested_job(stack) -> None:
             update(JobRecord)
             .where(JobRecord.id == str(summary.id))
             .values(
-                lease_expires_at=(
-                    datetime.now(UTC) - timedelta(seconds=1)
-                ).replace(tzinfo=None)
+                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=1)).replace(tzinfo=None)
             )
         )
         session.commit()

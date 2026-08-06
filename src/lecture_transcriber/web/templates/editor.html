@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Editor {{ job_id }} — Lecture AI Transcriber{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Transcript editor</h1>
+  <p class="hint">Edits are derived from the immutable raw JSON transcript.</p>
+  <p id="editor-status" class="status">Loading…</p>
+  <div class="actions">
+    <button id="editor-save" type="button" disabled>Save revision</button>
+    <button id="editor-reload" type="button">Reload</button>
+  </div>
+  <p id="editor-error" class="error" hidden></p>
+</section>
+
+<section class="card">
+  <table class="editor-segments">
+    <thead>
+      <tr><th>#</th><th>Time</th><th>Speaker</th><th>Text</th><th>Raw warning</th></tr>
+    </thead>
+    <tbody id="editor-segments-body"></tbody>
+  </table>
+  <p id="editor-empty" class="hint" hidden>No canonical segments are available.</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/editor.js" defer></script>
+{% endblock %}

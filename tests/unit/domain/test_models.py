@@ -27,6 +27,7 @@ from lecture_transcriber.domain.models import (
     TranscriptionOptions,
     TranscriptSegment,
     TranscriptWarning,
+    TranscriptWord,
     WarningCode,
 )
 
@@ -64,6 +65,71 @@ def test_segment_default_review_state() -> None:
     segment = TranscriptSegment(index=0, start=0.0, end=1.0, text="x")
     assert segment.needs_review is False
     assert segment.review_reasons == ()
+
+
+# ---------------------------------------------------------------------------
+# TranscriptWord
+# ---------------------------------------------------------------------------
+
+
+def test_word_rejects_end_not_greater_than_start() -> None:
+    with pytest.raises(ValueError, match="end must be greater"):
+        TranscriptWord(index=0, start=0.5, end=0.5, text="слово")
+    with pytest.raises(ValueError, match="end must be greater"):
+        TranscriptWord(index=0, start=0.5, end=0.4, text="слово")
+
+
+def test_word_rejects_out_of_range_probability() -> None:
+    with pytest.raises(ValueError, match="probability"):
+        TranscriptWord(index=0, start=0.0, end=0.5, text="x", probability=1.5)
+    with pytest.raises(ValueError, match="probability"):
+        TranscriptWord(index=0, start=0.0, end=0.5, text="x", probability=-0.1)
+
+
+def test_word_accepts_boundary_probabilities_and_none() -> None:
+    assert TranscriptWord(index=0, start=0.0, end=0.5, text="x", probability=0.0).probability == 0.0
+    assert TranscriptWord(index=0, start=0.0, end=0.5, text="x", probability=1.0).probability == 1.0
+    assert TranscriptWord(index=0, start=0.0, end=0.5, text="x").probability is None
+
+
+def test_segment_rejects_misordered_words() -> None:
+    with pytest.raises(ValueError, match="chronological"):
+        TranscriptSegment(
+            index=0,
+            start=0.0,
+            end=1.0,
+            text="a b",
+            words=(
+                TranscriptWord(index=1, start=0.5, end=0.6, text="b"),
+                TranscriptWord(index=0, start=0.0, end=0.4, text="a"),
+            ),
+        )
+    with pytest.raises(ValueError, match="chronological"):
+        TranscriptSegment(
+            index=0,
+            start=0.0,
+            end=1.0,
+            text="a b",
+            words=(
+                TranscriptWord(index=0, start=0.4, end=0.5, text="a"),
+                TranscriptWord(index=1, start=0.1, end=0.2, text="b"),
+            ),
+        )
+
+
+def test_segment_accepts_empty_and_ordered_words() -> None:
+    assert TranscriptSegment(index=0, start=0.0, end=1.0, text="x").words == ()
+    seg = TranscriptSegment(
+        index=0,
+        start=0.0,
+        end=1.0,
+        text="a b",
+        words=(
+            TranscriptWord(index=0, start=0.0, end=0.4, text="a"),
+            TranscriptWord(index=1, start=0.5, end=0.6, text="b"),
+        ),
+    )
+    assert len(seg.words) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +314,7 @@ def test_canonical_json_is_deterministic_and_has_schema_version() -> None:
     media = _media()
     seg = TranscriptSegment(index=0, start=0.0, end=1.234, text="Добрый день.")
     transcript = Transcript(
-        schema_version="1.0",
+        schema_version="2.0",
         job_id=uuid4(),
         media=media,
         engine=EngineMetadata(
@@ -268,18 +334,17 @@ def test_canonical_json_is_deterministic_and_has_schema_version() -> None:
     text1 = transcript.canonical_json()
     text2 = transcript.canonical_json()
     assert text1 == text2
-    assert '"schema_version": "1.0"' in text1
+    assert '"schema_version": "2.0"' in text1
+    assert '"transcript_kind": "raw_canonical"' in text1
     # 3-decimal rounding
     assert '"end": 1.234' in text1
 
 
 def test_canonical_json_preserves_verbatim_text() -> None:
     media = _media()
-    seg = TranscriptSegment(
-        index=0, start=0.0, end=1.0, text="  спасибо за просмотр  "
-    )
+    seg = TranscriptSegment(index=0, start=0.0, end=1.0, text="  спасибо за просмотр  ")
     transcript = Transcript(
-        schema_version="1.0",
+        schema_version="2.0",
         job_id=uuid4(),
         media=media,
         engine=EngineMetadata(
@@ -297,12 +362,115 @@ def test_canonical_json_preserves_verbatim_text() -> None:
     )
     data = json.loads(transcript.canonical_json())
     assert data["segments"][0]["text"] == "  спасибо за просмотр  "
+    assert data["transcript_kind"] == "raw_canonical"
+    assert data["segments"][0]["words"] == []
+    assert "speaker_id" not in data["segments"][0]
+    assert data["segments"][0]["id"]
+
+
+def test_transcript_rejects_non_raw_canonical_kind() -> None:
+    media = _media()
+    with pytest.raises(ValueError, match="transcript_kind"):
+        Transcript(
+            schema_version="2.0",
+            job_id=uuid4(),
+            media=media,
+            engine=EngineMetadata(
+                name="faster-whisper",
+                version="1.2.0",
+                model="small",
+                device="cpu",
+                compute_type="int8",
+            ),
+            language=LanguageMetadata(requested=None, detected="ru", probability=0.9),
+            segments=(),
+            warnings=(),
+            source_duration_seconds=1.0,
+            vad_duration_seconds=None,
+            transcript_kind="polished",
+        )
+
+
+def test_canonical_json_v2_has_segment_id_and_words() -> None:
+    media = _media()
+    seg = TranscriptSegment(
+        index=0,
+        start=0.0,
+        end=1.0,
+        text="привет мир",
+        words=(
+            TranscriptWord(index=0, start=0.0, end=0.4, text="привет", probability=0.99),
+            TranscriptWord(index=1, start=0.5, end=0.9, text="мир", probability=0.95),
+        ),
+    )
+    transcript = Transcript(
+        schema_version="2.0",
+        job_id=uuid4(),
+        media=media,
+        engine=EngineMetadata(
+            name="faster-whisper",
+            version="1.2.0",
+            model="small",
+            device="cpu",
+            compute_type="int8",
+        ),
+        language=LanguageMetadata(requested=None, detected="ru", probability=0.9),
+        segments=(seg,),
+        warnings=(),
+        source_duration_seconds=1.0,
+        vad_duration_seconds=None,
+    )
+    data = json.loads(transcript.canonical_json())
+    assert data["schema_version"] == "2.0"
+    assert data["transcript_kind"] == "raw_canonical"
+    segment = data["segments"][0]
+    assert segment["id"]
+    assert segment["words"] == [
+        {"index": 0, "start": 0.0, "end": 0.4, "text": "привет", "probability": 0.99},
+        {"index": 1, "start": 0.5, "end": 0.9, "text": "мир", "probability": 0.95},
+    ]
+    # Deterministic id across serializations
+    data2 = json.loads(transcript.canonical_json())
+    assert data2["segments"][0]["id"] == segment["id"]
+
+
+def test_canonical_json_v2_rounds_word_timestamps_to_3_decimals() -> None:
+    media = _media()
+    seg = TranscriptSegment(
+        index=0,
+        start=0.0,
+        end=1.0,
+        text="x",
+        words=(TranscriptWord(index=0, start=0.1234, end=0.5678, text="x", probability=0.9),),
+    )
+    transcript = Transcript(
+        schema_version="2.0",
+        job_id=uuid4(),
+        media=media,
+        engine=EngineMetadata(
+            name="faster-whisper",
+            version="1.2.0",
+            model="small",
+            device="cpu",
+            compute_type="int8",
+        ),
+        language=LanguageMetadata(requested=None, detected="ru", probability=0.9),
+        segments=(seg,),
+        warnings=(),
+        source_duration_seconds=1.0,
+        vad_duration_seconds=None,
+    )
+    data = json.loads(transcript.canonical_json())
+    word = data["segments"][0]["words"][0]
+    assert word["start"] == round(0.1234, 3)
+    assert word["end"] == round(0.5678, 3)
+    assert word["probability"] == 0.9
 
 
 def test_transcript_rejects_duplicate_or_out_of_order_segment_indexes() -> None:
     media = _media()
     common = dict(
-        schema_version="1.0",
+        schema_version="2.0",
         job_id=uuid4(),
         media=media,
         engine=EngineMetadata(
@@ -464,6 +632,7 @@ def test_polish_result_requires_text_when_changed() -> None:
 
 def test_editor_revision_requires_non_empty_text() -> None:
     from datetime import UTC, datetime
+
     from lecture_transcriber.domain.models import EditorRevision
 
     with pytest.raises(ValueError, match="revised_text must not be empty"):

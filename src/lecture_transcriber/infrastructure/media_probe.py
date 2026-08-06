@@ -36,13 +36,9 @@ class PyAVMediaProbe(MediaProbe):
     def probe(self, path: Path) -> MediaProbeResult:
         try:
             with av.open(str(path)) as container:
-                audio_streams = [
-                    s for s in container.streams if s.type == "audio"
-                ]
+                audio_streams = [s for s in container.streams if s.type == "audio"]
                 if not audio_streams:
-                    raise MediaProbeFailed(
-                        f"file {path.name} has no decodable audio stream"
-                    )
+                    raise MediaProbeFailed(f"file {path.name} has no decodable audio stream")
                 stream = audio_streams[0]
                 audio_codec = stream.codec.name or "unknown"
                 ctx = stream.codec_context
@@ -57,9 +53,9 @@ class PyAVMediaProbe(MediaProbe):
 
                 duration = _duration_seconds(container, stream)
 
-                media_type = "video" if any(
-                    s.type == "video" for s in container.streams
-                ) else "audio"
+                media_type = (
+                    "video" if any(s.type == "video" for s in container.streams) else "audio"
+                )
 
                 return MediaProbeResult(
                     media_type=media_type,  # type: ignore[arg-type]

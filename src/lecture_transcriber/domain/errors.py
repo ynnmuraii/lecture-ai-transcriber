@@ -73,3 +73,15 @@ class JobLeaseLost(DomainError):
 
 class InvalidOptions(DomainError):
     """Raised when application options fail validation before job creation."""
+
+
+class EditorError(DomainError):
+    """Base class for derived editor persistence and validation errors."""
+
+
+class EditorConflict(EditorError):
+    """Raised when a save uses a stale optimistic-concurrency revision."""
+
+
+class EditorValidationError(EditorError):
+    """Raised when a save attempts an unknown or protected edit."""

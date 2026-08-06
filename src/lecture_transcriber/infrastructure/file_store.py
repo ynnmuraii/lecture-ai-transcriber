@@ -67,9 +67,7 @@ class LocalFileStore(FileStore):
                     if size > max_bytes:
                         out.close()
                         tmp_target.unlink(missing_ok=True)
-                        raise MediaTooLarge(
-                            f"upload exceeds {max_bytes} bytes"
-                        )
+                        raise MediaTooLarge(f"upload exceeds {max_bytes} bytes")
                     sha.update(chunk)
                     out.write(chunk)
                 out.flush()
@@ -171,6 +169,14 @@ def _artifact_format(filename: str) -> str:
         raise ValueError("filename must not be empty")
     if "/" in filename or "\\" in filename or filename in {".", ".."}:
         raise ValueError("filename must not contain path separators")
+    if filename == "speaker.json":
+        return "speaker"
+    if filename == "speaker.txt":
+        return "speaker_txt"
+    if filename == "polished.json":
+        return "polished"
+    if filename == "editor.json":
+        return "editor"
     fmt = filename.rsplit(".", 1)[-1]
     if fmt not in ("json", "txt", "srt", "vtt"):
         raise ValueError(f"artifact extension {fmt!r} is not supported")

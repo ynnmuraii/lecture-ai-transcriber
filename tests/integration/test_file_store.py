@@ -79,6 +79,16 @@ def test_unsupported_artifact_format_is_rejected_before_write(
     assert not (data_dir / "jobs" / str(job_id)).exists()
 
 
+def test_speaker_txt_uses_distinct_artifact_format(data_dir: Path) -> None:
+    from uuid import uuid4
+
+    store = _store(data_dir)
+    stored = store.write_artifact_atomic(uuid4(), "speaker.txt", b"speaker text\n")
+
+    assert stored.artifact.format == "speaker_txt"
+    assert stored.physical_path.name == "speaker.txt"
+
+
 def test_atomic_artifact_set_cleans_staging_when_publish_fails(
     data_dir: Path,
     monkeypatch: pytest.MonkeyPatch,

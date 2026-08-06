@@ -6,8 +6,10 @@ The validator marks suspicious segments with :class:`TranscriptWarning` and
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from typing import TypeGuard
 
 from lecture_transcriber.domain.enums import WarningCode
 from lecture_transcriber.domain.models import (
@@ -63,9 +65,7 @@ def validate_transcript(
                 warnings,
                 TranscriptWarning(
                     code=WarningCode.LOW_AVG_LOGPROB,
-                    message=(
-                        f"segment {seg.index} has low avg_logprob={seg.avg_logprob:.3f}"
-                    ),
+                    message=(f"segment {seg.index} has low avg_logprob={seg.avg_logprob:.3f}"),
                     segment_index=seg.index,
                 ),
             )
@@ -97,8 +97,7 @@ def validate_transcript(
                 TranscriptWarning(
                     code=WarningCode.HIGH_NO_SPEECH_PROBABILITY,
                     message=(
-                        f"segment {seg.index} has high "
-                        f"no_speech_prob={seg.no_speech_prob:.3f}"
+                        f"segment {seg.index} has high no_speech_prob={seg.no_speech_prob:.3f}"
                     ),
                     segment_index=seg.index,
                 ),
@@ -133,6 +132,72 @@ def validate_transcript(
             )
             reasons.append(WarningCode.TIMESTAMP_OUT_OF_RANGE.value)
 
+        if seg.words:
+            prev_word_end: float | None = None
+            for word_index, word in enumerate(seg.words):
+                start = getattr(word, "start", None)
+                end = getattr(word, "end", None)
+
+                if (
+                    _is_finite_number(start)
+                    and _is_finite_number(end)
+                    and start >= 0
+                    and end > start
+                ):
+                    if (
+                        prev_word_end is not None
+                        and start < prev_word_end - TIMESTAMP_TOLERANCE_SECONDS
+                    ):
+                        if WarningCode.WORD_TIMESTAMP_OVERLAP.value not in reasons:
+                            reasons.append(WarningCode.WORD_TIMESTAMP_OVERLAP.value)
+                        _add(
+                            warnings,
+                            TranscriptWarning(
+                                code=WarningCode.WORD_TIMESTAMP_OVERLAP,
+                                message=(
+                                    f"segment {seg.index} word {word_index} "
+                                    f"starts at {start:.3f} which overlaps "
+                                    f"previous word end {prev_word_end:.3f}"
+                                ),
+                                segment_index=seg.index,
+                            ),
+                        )
+                    if (
+                        start < seg.start - TIMESTAMP_TOLERANCE_SECONDS
+                        or end > seg.end + TIMESTAMP_TOLERANCE_SECONDS
+                    ):
+                        if WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE.value not in reasons:
+                            reasons.append(WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE.value)
+                        _add(
+                            warnings,
+                            TranscriptWarning(
+                                code=WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE,
+                                message=(
+                                    f"segment {seg.index} word {word_index} has "
+                                    f"start {start:.3f} or end {end:.3f} outside "
+                                    f"segment [{seg.start:.3f}, {seg.end:.3f}]"
+                                ),
+                                segment_index=seg.index,
+                            ),
+                        )
+                else:
+                    if WarningCode.WORD_INVALID_RANGE.value not in reasons:
+                        reasons.append(WarningCode.WORD_INVALID_RANGE.value)
+                    _add(
+                        warnings,
+                        TranscriptWarning(
+                            code=WarningCode.WORD_INVALID_RANGE,
+                            message=(
+                                f"segment {seg.index} word {word_index} has "
+                                f"invalid range start={start!r} end={end!r}"
+                            ),
+                            segment_index=seg.index,
+                        ),
+                    )
+
+                if _is_finite_number(end):
+                    prev_word_end = float(end)
+
         new_segments.append(
             replace(
                 seg,
@@ -162,6 +227,11 @@ def validate_transcript(
         segments=tuple(new_segments),
         warnings=tuple(warnings.values()),
     )
+
+
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
+    """True when ``value`` is a finite real number (not a bool/string)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _add(

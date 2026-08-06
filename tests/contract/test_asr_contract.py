@@ -5,7 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from lecture_transcriber.domain.models import TranscriptionOptions, TranscriptSegment
+from lecture_transcriber.domain.ports import ASREngine
 from tests.contract.fakes import FakeASREngine
+
+
+def test_asr_contract_close_marks_engine_closed() -> None:
+    engine = FakeASREngine()
+    assert isinstance(engine, ASREngine)
+    assert engine.closed is False
+    engine.close()
+    assert engine.closed is True
 
 
 def test_asr_contract_emits_verbatim_text(tmp_path: Path) -> None:

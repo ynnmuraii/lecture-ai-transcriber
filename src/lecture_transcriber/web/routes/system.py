@@ -6,6 +6,7 @@ import faster_whisper  # type: ignore[import-untyped]
 from fastapi import APIRouter, Depends
 
 from lecture_transcriber.bootstrap import ApplicationContainer
+from lecture_transcriber.domain.enums import ASREngineChoice
 from lecture_transcriber.web.dependencies import get_container
 from lecture_transcriber.web.schemas import HardwareOut, SystemOut
 
@@ -18,6 +19,10 @@ def get_system(
 ) -> SystemOut:
     facts = container.hardware.detect()
     available = [m.name for m in container.model_cache.list_models()]
+    default_model = container.profiles.select(
+        facts,
+        engine=ASREngineChoice.AUTO,
+    ).model
     return SystemOut(
         data_dir=str(container.settings.data_dir),
         offline=container.settings.offline,
@@ -30,8 +35,10 @@ def get_system(
             vram_bytes=facts.vram_bytes,
         ),
         available_models=available,
-        asr_engine="faster-whisper",
+        asr_engine=ASREngineChoice.AUTO.value,
+        asr_engines=[choice.value for choice in ASREngineChoice],
         asr_version=faster_whisper.__version__,
+        default_model=default_model,
     )
 
 

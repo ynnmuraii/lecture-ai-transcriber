@@ -55,7 +55,8 @@ class JobRecord(Base):
         CheckConstraint(
             "status IN ("
             "'queued','probing','loading_model','transcribing','validating',"
-            "'exporting','completed','completed_with_warnings','failed','cancelled'"
+            "'exporting','diarizing','polishing','completed','completed_with_warnings',"
+            "'failed','cancelled'"
             ")",
             name="ck_jobs_status",
         ),
@@ -63,9 +64,7 @@ class JobRecord(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    media_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("media.id"), nullable=False
-    )
+    media_id: Mapped[str] = mapped_column(String(36), ForeignKey("media.id"), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     stage_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -81,29 +80,19 @@ class JobRecord(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     events: Mapped[list[JobEventRecord]] = relationship(back_populates="job")
 
 
 class JobEventRecord(Base):
     __tablename__ = "job_events"
-    __table_args__ = (
-        Index("ix_job_events_job_id_occurred_at", "job_id", "occurred_at"),
-    )
+    __table_args__ = (Index("ix_job_events_job_id_occurred_at", "job_id", "occurred_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    job_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("jobs.id"), nullable=False
-    )
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    job_id: Mapped[str] = mapped_column(String(36), ForeignKey("jobs.id"), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -114,28 +103,54 @@ class JobEventRecord(Base):
 class ArtifactRecord(Base):
     __tablename__ = "artifacts"
     __table_args__ = (
-        UniqueConstraint("job_id", "format", name="uq_artifacts_job_format"),
         CheckConstraint(
-            "format IN ('json','txt','srt','vtt')",
+            "format IN ('json','txt','srt','vtt','speaker','speaker_txt','polished','editor')",
             name="ck_artifacts_format",
         ),
+        UniqueConstraint("job_id", "format", name="uq_artifacts_job_format"),
         Index("ix_artifacts_job_id", "job_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    job_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("jobs.id"), nullable=False
-    )
-    format: Mapped[str] = mapped_column(String(8), nullable=False)
+    job_id: Mapped[str] = mapped_column(String(36), ForeignKey("jobs.id"), nullable=False)
+    format: Mapped[str] = mapped_column(String(16), nullable=False)
     relative_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class EditorDocumentRecord(Base):
+    __tablename__ = "editor_documents"
+
+    job_id: Mapped[str] = mapped_column(String(36), ForeignKey("jobs.id"), primary_key=True)
+    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    current_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    edits_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class EditorRevisionRecord(Base):
+    __tablename__ = "editor_revisions"
+    __table_args__ = (
+        UniqueConstraint("job_id", "revision", name="uq_editor_revisions_job_revision"),
+        Index("ix_editor_revisions_job_id", "job_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(36), ForeignKey("jobs.id"), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    edits_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 __all__ = [
     "ArtifactRecord",
     "Base",
+    "EditorDocumentRecord",
+    "EditorRevisionRecord",
     "JobEventRecord",
     "JobRecord",
     "MediaRecord",

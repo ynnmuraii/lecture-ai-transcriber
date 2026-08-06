@@ -20,6 +20,8 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv/
@@ -51,6 +53,6 @@ htmlcov/
 
 
 # Documentation
-/docs/
-/.superpowers/
-/decisions/
+docs/
+.superpowers/
+decisions/

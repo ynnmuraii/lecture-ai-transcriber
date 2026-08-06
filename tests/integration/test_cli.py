@@ -140,6 +140,22 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Settings]:
     asr: ASREngine = FakeASREngine(
         segments=(TranscriptSegment(index=0, start=0.0, end=1.0, text="привет"),)
     )
+    from lecture_transcriber.domain.ports import DiarizationResult
+
+    class _FakeDiarization:
+        def prepare(self, options, is_cancelled) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def diarize(self, media_path, options, is_cancelled):  # type: ignore[no-untyped-def]
+            return DiarizationResult(
+                turns=(),
+                engine_name="fake-diarization",
+                model_name="fake-model",
+            )
+
+        def close(self) -> None:
+            return None
+
     run = RunJobService(
         job_repo=job_repo,
         media_repo=media_repo,
@@ -148,6 +164,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Settings]:
         engine=asr,
         exporter=exporter,
         clock=SystemClock(),
+        diarization_factory=lambda options: _FakeDiarization(),
     )
 
     container = ApplicationContainer(
@@ -215,6 +232,20 @@ def test_models_list_offline(env) -> None:
     assert "small" in payload["models"]
 
 
+def test_gigaam_model_list_reports_gigaam_cache(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "lecture_transcriber.transcription.gigaam_engine.list_cached_gigaam_models",
+        lambda _cache: ["v3_e2e_rnnt"],
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["models", "list", "--engine", "gigaam", "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["engine"] == "gigaam"
+    assert payload["models"] == ["v3_e2e_rnnt"]
+
+
 def test_transcribe_runs_to_completion(env, tmp_path: Path) -> None:
     sample = tmp_path / "cli_sample.mp4"
     sample.write_bytes(b"\x00\x00\x00\x00ftypisom" + b"\x00" * 200)
@@ -231,6 +262,74 @@ def test_transcribe_runs_to_completion(env, tmp_path: Path) -> None:
     assert len(paths) == 4
     formats = {p.rsplit(".", 1)[-1] for p in paths}
     assert formats == {"json", "txt", "srt", "vtt"}
+    # The canonical v2 JSON artifact is published first and exposes the
+    # raw_canonical contract without any new CLI option.
+    json_path = next(p for p in paths if p.endswith("transcript.json"))
+    canonical = json.loads((env.data_dir / json_path).read_text(encoding="utf-8"))
+    assert canonical["schema_version"] == "2.0"
+    assert canonical["transcript_kind"] == "raw_canonical"
+    first_segment = canonical["segments"][0]
+    assert "id" in first_segment
+    assert isinstance(first_segment["words"], list)
+    # The fake ASR engine emits no word timestamps, so words is empty.
+    assert first_segment["words"] == []
+
+
+def test_transcribe_with_diarization_lists_speaker_txt(env, tmp_path: Path) -> None:
+    sample = tmp_path / "cli_spk.mp4"
+    sample.write_bytes(b"\x00\x00\x00\x00ftypisom" + b"\x00" * 200)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "transcribe",
+            str(sample),
+            "--language",
+            "ru",
+            "--diarization",
+            "pyannote",
+            "--wait",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["status"] in (
+        JobStatus.COMPLETED.value,
+        JobStatus.COMPLETED_WITH_WARNINGS.value,
+    )
+    paths = payload["artifacts"]
+    file_names = {p.rsplit("/", 1)[-1] for p in paths}
+    assert "transcript.txt" in file_names
+    assert "speaker.txt" in file_names
+
+
+def test_engine_and_model_options_are_exposed(env) -> None:
+    runner = CliRunner()
+    root = runner.invoke(app, ["--help"])
+    assert root.exit_code == 0
+    removed_command = "".join(("bench", "mark"))
+    assert removed_command not in root.stdout
+
+    transcribe_help = runner.invoke(app, ["transcribe", "--help"], terminal_width=200)
+    assert transcribe_help.exit_code == 0
+    for expected in (
+        "--language",
+        "--engine",
+        "--model",
+        "--diarization",
+        "--polish",
+        "--polish-model",
+        "--wait",
+        "--json",
+    ):
+        assert expected in transcribe_help.stdout
+    full_polish_help = runner.invoke(
+        app,
+        ["transcribe", "--polish-full-transcript", "--help"],
+    )
+    assert full_polish_help.exit_code == 0
+    assert "--diarize" not in transcribe_help.stdout
 
 
 def test_invalid_job_id_returns_nonzero(env) -> None:

@@ -13,7 +13,7 @@ import string
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from lecture_transcriber.domain.enums import (
     ALLOWED_TRANSITIONS,
@@ -21,8 +21,11 @@ from lecture_transcriber.domain.enums import (
     DiarizationBackend,
     PolishBackend,
     TERMINAL_STATUSES,
+    ASREngineChoice,
+    DiarizationBackend,
     JobStatus,
     MediaType,
+    PolishBackend,
     WarningCode,
 )
 from lecture_transcriber.domain.errors import (
@@ -117,7 +120,7 @@ class TranscriptionOptions:
         ``ollama`` sends ``needs_review`` segments to a local Ollama model.
     polish_model
         Ollama model tag used when ``polish=ollama``.  An empty string means
-        "use the application default" (e.g. ``t-lite-it-2.1:q4_k_m``).
+        "use the application default" (e.g. ``t-tech/T-lite-it-2.1:q4_k_m``).
     polish_full_transcript
         When ``True`` every segment is sent for polishing, not just those
         flagged ``needs_review=True``.  Defaults to ``False`` to preserve
@@ -151,15 +154,9 @@ class TranscriptionOptions:
             _require_finite("temperatures", t)
             if t < 0:
                 raise ValueError("temperatures must be non-negative")
-        _require_in_range(
-            "vad_min_silence_ms", self.vad_min_silence_ms, low=0, high=10_000
-        )
-        _require_in_range(
-            "vad_speech_pad_ms", self.vad_speech_pad_ms, low=0, high=10_000
-        )
-        _require_in_range(
-            "chunk_length_seconds", self.chunk_length_seconds, low=5, high=600
-        )
+        _require_in_range("vad_min_silence_ms", self.vad_min_silence_ms, low=0, high=10_000)
+        _require_in_range("vad_speech_pad_ms", self.vad_speech_pad_ms, low=0, high=10_000)
+        _require_in_range("chunk_length_seconds", self.chunk_length_seconds, low=5, high=600)
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -186,24 +183,26 @@ class TranscriptionOptions:
             raw_engine = data.get("engine", ASREngineChoice.AUTO.value)
             try:
                 engine = ASREngineChoice(raw_engine)
-            except ValueError:
+            except ValueError as exc:
                 raise ValueError(
-                    f"engine must be one of {[e.value for e in ASREngineChoice]}, got {raw_engine!r}"
-                )
+                    "engine must be one of "
+                    f"{[e.value for e in ASREngineChoice]}, got {raw_engine!r}"
+                ) from exc
             raw_diarization = data.get("diarization", DiarizationBackend.OFF.value)
             try:
                 diarization = DiarizationBackend(raw_diarization)
-            except ValueError:
+            except ValueError as exc:
                 raise ValueError(
-                    f"diarization must be one of {[e.value for e in DiarizationBackend]}, got {raw_diarization!r}"
-                )
+                    "diarization must be one of "
+                    f"{[e.value for e in DiarizationBackend]}, got {raw_diarization!r}"
+                ) from exc
             raw_polish = data.get("polish", PolishBackend.OFF.value)
             try:
                 polish = PolishBackend(raw_polish)
-            except ValueError:
+            except ValueError as exc:
                 raise ValueError(
                     f"polish must be one of {[e.value for e in PolishBackend]}, got {raw_polish!r}"
-                )
+                ) from exc
             polish_full = data.get("polish_full_transcript", False)
             if not isinstance(polish_full, bool):
                 raise ValueError("polish_full_transcript must be a boolean")
@@ -314,19 +313,16 @@ class LanguageMetadata:
 
 @dataclass(frozen=True)
 class WordTiming:
-    """One word returned by the ASR engine with per-word timestamps.
+    """One raw word returned by the ASR engine with per-word timestamps.
 
-    These are **raw ASR outputs** and must never be modified by diarization or
-    polishing.  Speaker assignment (``speaker_id``) is added by the diarization
-    stage and is ``None`` when diarization is disabled or the word falls in an
-    ambiguous gap between two speaker turns.
+    Speaker assignment is a separate derived projection and must never be
+    stored on this raw value object.
     """
 
     word: str
     start: float
     end: float
     probability: float | None = None
-    speaker_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.word:
@@ -386,9 +382,7 @@ class PolishResult:
     def __post_init__(self) -> None:
         _require_non_negative_int("segment_index", self.segment_index)
         if self.changed and not self.polished_text:
-            raise ValueError(
-                "polished_text must be set when changed=True"
-            )
+            raise ValueError("polished_text must be set when changed=True")
 
 
 @dataclass(frozen=True)
@@ -418,16 +412,42 @@ class EditorRevision:
 
 
 @dataclass(frozen=True)
+class TranscriptWord:
+    """One word-level transcription unit within a segment.
+
+    Word timestamps are the foundation for deterministic speaker assignment
+    and word-level derived exports. Containment in a segment and cross-word
+    chronological order are validated by the upstream validator, not here.
+    """
+
+    index: int
+    start: float
+    end: float
+    text: str
+    probability: float | None = None
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int("index", self.index)
+        _require_finite("start", self.start)
+        _require_finite("end", self.end)
+        if self.start < 0:
+            raise ValueError("start must be non-negative")
+        if self.end <= self.start:
+            raise ValueError("end must be greater than start")
+        if self.probability is not None:
+            _require_finite("probability", self.probability)
+            if not 0.0 <= self.probability <= 1.0:
+                raise ValueError("probability must be in [0.0, 1.0]")
+
+
+@dataclass(frozen=True)
 class TranscriptSegment:
     """One verbatim ASR segment.
 
     The text is preserved exactly as the engine returned it (apart from a
     single outer-whitespace strip in the canonical exporter). The application
-    must not rewrite, merge or drop segments.
-
-    ``speaker_id`` is set by the diarization stage; it is ``None`` when
-    diarization is disabled or the segment timestamp falls in an ambiguous
-    gap.  It is informational and **must not** influence the raw text.
+    must not rewrite, merge or drop segments. Speaker and polish projections
+    reference this raw segment without changing it.
     """
 
     index: int
@@ -440,7 +460,7 @@ class TranscriptSegment:
     temperature: float | None = None
     needs_review: bool = False
     review_reasons: tuple[str, ...] = ()
-    speaker_id: str | None = None
+    words: tuple[TranscriptWord, ...] = ()
 
     def __post_init__(self) -> None:
         _require_non_negative_int("index", self.index)
@@ -459,6 +479,12 @@ class TranscriptSegment:
             _require_optional_finite(name, value)
         if self.no_speech_prob is not None and not 0.0 <= self.no_speech_prob <= 1.0:
             raise ValueError("no_speech_prob must be in [0.0, 1.0]")
+        word_indexes = tuple(word.index for word in self.words)
+        if word_indexes != tuple(sorted(word_indexes)):
+            raise ValueError("words must be in chronological order")
+        word_starts = tuple(word.start for word in self.words)
+        if word_starts != tuple(sorted(word_starts)):
+            raise ValueError("words must be in chronological order")
 
 
 @dataclass(frozen=True)
@@ -489,8 +515,11 @@ class Transcript:
     warnings: tuple[TranscriptWarning, ...]
     source_duration_seconds: float
     vad_duration_seconds: float | None
+    transcript_kind: str = "raw_canonical"
 
     def __post_init__(self) -> None:
+        if self.transcript_kind != "raw_canonical":
+            raise ValueError("transcript_kind must be 'raw_canonical'")
         _require_finite("source_duration_seconds", self.source_duration_seconds)
         if self.source_duration_seconds < 0:
             raise ValueError("source_duration_seconds must be non-negative")
@@ -508,6 +537,7 @@ class Transcript:
         """Produce a stable, JSON-serialisable dict for canonical output."""
         return {
             "schema_version": self.schema_version,
+            "transcript_kind": self.transcript_kind,
             "job_id": str(self.job_id),
             "media": {
                 "id": str(self.media.id),
@@ -534,6 +564,7 @@ class Transcript:
             "vad_duration_seconds": self.vad_duration_seconds,
             "segments": [
                 {
+                    "id": str(uuid5(self.job_id, f"segment:{seg.index}")),
                     "index": seg.index,
                     "start": round(float(seg.start), 3),
                     "end": round(float(seg.end), 3),
@@ -544,7 +575,16 @@ class Transcript:
                     "temperature": seg.temperature,
                     "needs_review": seg.needs_review,
                     "review_reasons": list(seg.review_reasons),
-                    "speaker_id": seg.speaker_id,
+                    "words": [
+                        {
+                            "index": word.index,
+                            "start": round(float(word.start), 3),
+                            "end": round(float(word.end), 3),
+                            "text": word.text,
+                            "probability": word.probability,
+                        }
+                        for word in seg.words
+                    ],
                 }
                 for seg in self.segments
             ],
@@ -559,13 +599,16 @@ class Transcript:
         }
 
     def canonical_json(self) -> str:
-        return json.dumps(
-            self.to_canonical_dict(),
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-            allow_nan=False,
-        ) + "\n"
+        return (
+            json.dumps(
+                self.to_canonical_dict(),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
+        )
 
 
 @dataclass(frozen=True)
@@ -574,17 +617,81 @@ class Artifact:
 
     id: UUID
     job_id: UUID
-    format: Literal["json", "txt", "srt", "vtt"]
+    format: Literal[
+        "json",
+        "txt",
+        "srt",
+        "vtt",
+        "speaker",
+        "speaker_txt",
+        "polished",
+        "editor",
+    ]
     relative_path: str
     size_bytes: int
     sha256: str
     created_at: datetime
 
     def __post_init__(self) -> None:
-        if self.format not in ("json", "txt", "srt", "vtt"):
-            raise ValueError("artifact format must be json, txt, srt or vtt")
+        if self.format not in {
+            "json",
+            "txt",
+            "srt",
+            "vtt",
+            "speaker",
+            "speaker_txt",
+            "polished",
+            "editor",
+        }:
+            raise ValueError(
+                "artifact format must be json, txt, srt, vtt, speaker, "
+                "speaker_txt, polished or editor"
+            )
         _require_non_negative_int("size_bytes", self.size_bytes)
         _require_sha256(self.sha256)
+
+
+@dataclass(frozen=True)
+class EditorEdit:
+    """One derived text edit keyed by an immutable canonical segment ID."""
+
+    segment_id: str
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.segment_id:
+            raise ValueError("segment_id must not be empty")
+        if not self.text.strip():
+            raise ValueError("edited text must not be empty")
+
+
+@dataclass(frozen=True)
+class EditorRevisionEntry:
+    """Append-only editor revision metadata and changed segment values."""
+
+    revision: int
+    raw_sha256: str
+    edits: tuple[EditorEdit, ...]
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int("revision", self.revision)
+        _require_sha256(self.raw_sha256)
+
+
+@dataclass(frozen=True)
+class EditorDocumentState:
+    """Persisted editor state for one exact raw transcript artifact."""
+
+    job_id: UUID
+    raw_sha256: str
+    revision: int
+    edits: tuple[EditorEdit, ...]
+    history: tuple[EditorRevisionEntry, ...]
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.raw_sha256)
+        _require_non_negative_int("revision", self.revision)
 
 
 @dataclass(frozen=True)
