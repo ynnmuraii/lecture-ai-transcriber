@@ -52,3 +52,5 @@ htmlcov/
 
 # Documentation
 /docs/
+/.superpowers/
+/decisions/
