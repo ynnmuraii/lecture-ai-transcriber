@@ -41,4 +41,16 @@ def job_page(
     return _templates.TemplateResponse(request, "job.html", {"job_id": str(job_id)})
 
 
+@router.get("/jobs/{job_id}/editor", response_model=None)
+def editor_page(
+    request: Request,
+    job_id: UUID,
+    container: ApplicationContainer = Depends(get_container),
+) -> HTMLResponse | JSONResponse:
+    if container.get_job.get_summary(job_id) is None:
+        body = ErrorEnvelope(error=ErrorBody(code="JOB_NOT_FOUND", message="job not found"))
+        return JSONResponse(status_code=404, content=body.model_dump(mode="json"))
+    return _templates.TemplateResponse(request, "editor.html", {"job_id": str(job_id)})
+
+
 __all__ = ["router"]

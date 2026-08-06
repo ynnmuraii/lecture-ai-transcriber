@@ -19,8 +19,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from lecture_transcriber.domain.enums import ErrorCode, JobStatus, MediaType
+from lecture_transcriber.domain.errors import EditorConflict
 from lecture_transcriber.domain.models import (
     Artifact,
+    EditorDocumentState,
+    EditorEdit,
+    EditorRevisionEntry,
     HardwareProfile,
     JobEvent,
     Media,
@@ -29,12 +33,15 @@ from lecture_transcriber.domain.models import (
 )
 from lecture_transcriber.domain.ports import (
     ArtifactRepository,
+    EditorRepository,
     JobEventRepository,
     JobRepository,
     MediaRepository,
 )
 from lecture_transcriber.infrastructure.orm import (
     ArtifactRecord,
+    EditorDocumentRecord,
+    EditorRevisionRecord,
     JobEventRecord,
     JobRecord,
     MediaRecord,
@@ -118,6 +125,92 @@ class SqlArtifactRepository(ArtifactRepository):
             if record is None:
                 return None
             return _artifact_from_record(record)
+
+
+class SqlEditorRepository(EditorRepository):
+    """SQLite-backed append-only editor state."""
+
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    def get_or_create(
+        self,
+        job_id: UUID,
+        raw_sha256: str,
+        occurred_at: datetime,
+    ) -> EditorDocumentState:
+        with self._session_factory() as session:
+            record = session.get(EditorDocumentRecord, str(job_id))
+            if record is None:
+                record = EditorDocumentRecord(
+                    job_id=str(job_id),
+                    raw_sha256=raw_sha256,
+                    current_revision=0,
+                    edits_json="{}",
+                    created_at=occurred_at,
+                    updated_at=occurred_at,
+                )
+                session.add(record)
+                session.commit()
+            elif record.raw_sha256 != raw_sha256:
+                raise EditorConflict("raw transcript changed; editor state is stale")
+            return _editor_state(session, record)
+
+    def append_revision(
+        self,
+        job_id: UUID,
+        raw_sha256: str,
+        base_revision: int,
+        edits: tuple[EditorEdit, ...],
+        occurred_at: datetime,
+    ) -> EditorDocumentState:
+        with self._session_factory() as session:
+            record = session.get(EditorDocumentRecord, str(job_id), with_for_update=True)
+            if record is None:
+                if base_revision != 0:
+                    raise EditorConflict("editor document does not exist at this revision")
+                record = EditorDocumentRecord(
+                    job_id=str(job_id),
+                    raw_sha256=raw_sha256,
+                    current_revision=0,
+                    edits_json="{}",
+                    created_at=occurred_at,
+                    updated_at=occurred_at,
+                )
+                session.add(record)
+                session.flush()
+            if record.raw_sha256 != raw_sha256:
+                raise EditorConflict("raw transcript changed; editor state is stale")
+            if record.current_revision != base_revision:
+                raise EditorConflict(
+                    f"editor revision conflict: current={record.current_revision}, "
+                    f"base={base_revision}"
+                )
+            existing = json.loads(record.edits_json)
+            if not isinstance(existing, dict):
+                raise EditorConflict("stored editor state is invalid")
+            updated = {str(key): str(value) for key, value in existing.items()}
+            updated.update({edit.segment_id: edit.text for edit in edits})
+            next_revision = base_revision + 1
+            record.current_revision = next_revision
+            record.edits_json = json.dumps(updated, ensure_ascii=False, sort_keys=True)
+            record.updated_at = occurred_at
+            session.add(
+                EditorRevisionRecord(
+                    id=str(uuid4()),
+                    job_id=str(job_id),
+                    revision=next_revision,
+                    raw_sha256=raw_sha256,
+                    edits_json=json.dumps(
+                        {edit.segment_id: edit.text for edit in edits},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    created_at=occurred_at,
+                )
+            )
+            session.commit()
+            return _editor_state(session, record)
 
 
 class SqlJobEventRepository(JobEventRepository):
@@ -565,6 +658,47 @@ def _media_from_record(record: MediaRecord) -> Media:
     )
 
 
+def _editor_state(
+    session: Session,
+    record: EditorDocumentRecord,
+) -> EditorDocumentState:
+    current = json.loads(record.edits_json)
+    if not isinstance(current, dict):
+        raise EditorConflict("stored editor state is invalid")
+    edits = tuple(
+        EditorEdit(segment_id=str(segment_id), text=str(text_value))
+        for segment_id, text_value in sorted(current.items())
+    )
+    revisions = session.scalars(
+        select(EditorRevisionRecord)
+        .where(EditorRevisionRecord.job_id == record.job_id)
+        .order_by(EditorRevisionRecord.revision)
+    )
+    history: list[EditorRevisionEntry] = []
+    for revision in revisions:
+        changed = json.loads(revision.edits_json)
+        if not isinstance(changed, dict):
+            raise EditorConflict("stored editor revision is invalid")
+        history.append(
+            EditorRevisionEntry(
+                revision=revision.revision,
+                raw_sha256=revision.raw_sha256,
+                edits=tuple(
+                    EditorEdit(segment_id=str(segment_id), text=str(text_value))
+                    for segment_id, text_value in sorted(changed.items())
+                ),
+                created_at=_as_utc(revision.created_at),
+            )
+        )
+    return EditorDocumentState(
+        job_id=UUID(record.job_id),
+        raw_sha256=record.raw_sha256,
+        revision=record.current_revision,
+        edits=edits,
+        history=tuple(history),
+    )
+
+
 def _artifact_from_record(record: ArtifactRecord) -> Artifact:
     return Artifact(
         id=UUID(record.id),
@@ -601,9 +735,7 @@ def _job_from_record(record: JobRecord) -> TranscriptionJob:
         options=TranscriptionOptions.from_jsonable(json.loads(record.options_json)),
         cancel_requested=record.cancel_requested,
         worker_id=record.worker_id,
-        lease_expires_at=(
-            _as_utc(record.lease_expires_at) if record.lease_expires_at else None
-        ),
+        lease_expires_at=(_as_utc(record.lease_expires_at) if record.lease_expires_at else None),
         error_code=record.error_code,
         error_message=record.error_message,
         created_at=_as_utc(record.created_at),

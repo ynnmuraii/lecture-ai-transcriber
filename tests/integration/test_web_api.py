@@ -20,6 +20,7 @@ from uuid import uuid4
 import pytest
 from starlette.testclient import TestClient
 
+from lecture_transcriber.application.editor import EditorService
 from lecture_transcriber.application.services.cancel_job import CancelJobService
 from lecture_transcriber.application.services.create_job import CreateJobService
 from lecture_transcriber.application.services.export_transcript import (
@@ -48,6 +49,7 @@ from lecture_transcriber.infrastructure.file_store import LocalFileStore
 from lecture_transcriber.infrastructure.repositories import (
     SessionFactory,
     SqlArtifactRepository,
+    SqlEditorRepository,
     SqlJobEventRepository,
     SqlJobRepository,
     SqlMediaRepository,
@@ -86,6 +88,8 @@ def _silence_wav(path: Path, seconds: int = 4, rate: int = 16_000) -> None:
 
 def _build_container(
     settings: Settings,
+    *,
+    diarization_factory=None,
 ) -> tuple[ApplicationContainer, SessionFactory, InMemoryModelCache]:
     engine = create_engine(settings)
     initialize_database(engine)
@@ -94,11 +98,19 @@ def _build_container(
     job_repo = SqlJobRepository(sf)
     event_repo = SqlJobEventRepository(sf)
     artifact_repo = SqlArtifactRepository(sf)
+    editor_repo = SqlEditorRepository(sf)
     file_store = LocalFileStore(
         data_dir=settings.data_dir,
         media_dir=settings.media_dir,
         jobs_dir=settings.jobs_dir,
         tmp_dir=settings.tmp_dir,
+    )
+    editor = EditorService(
+        job_repo=job_repo,
+        artifact_repo=artifact_repo,
+        file_store=file_store,
+        editor_repo=editor_repo,
+        clock=SystemClock(),
     )
     probe = _StaticProbe()
     cache = InMemoryModelCache(available=("small", "medium"))
@@ -132,6 +144,9 @@ def _build_container(
     asr: ASREngine = FakeASREngine(
         segments=(TranscriptSegment(index=0, start=0.0, end=1.0, text="привет мир"),)
     )
+    run_kwargs = {}
+    if diarization_factory is not None:
+        run_kwargs["diarization_factory"] = diarization_factory
     run = RunJobService(
         job_repo=job_repo,
         media_repo=media_repo,
@@ -140,6 +155,7 @@ def _build_container(
         engine=asr,
         exporter=exporter,
         clock=SystemClock(),
+        **run_kwargs,
     )
     container = ApplicationContainer(
         settings=settings,
@@ -152,6 +168,7 @@ def _build_container(
         job_repo=job_repo,
         event_repo=event_repo,
         artifact_repo=artifact_repo,
+        editor_repo=editor_repo,
         importer=importer,
         exporter=exporter,
         create_job=create,
@@ -160,6 +177,7 @@ def _build_container(
         asr_engine=asr,
         run_job=run,
         session_factory=sf,
+        editor=editor,
     )
     return container, sf, cache
 
@@ -210,7 +228,9 @@ def test_system_endpoint_returns_diagnostics(client: TestClient) -> None:
     r = client.get("/api/system")
     assert r.status_code == 200
     body = r.json()
-    assert body["asr_engine"] == "faster-whisper"
+    assert body["asr_engine"] == "auto"
+    assert set(body["asr_engines"]) >= {"auto", "faster-whisper", "gigaam"}
+    assert body["default_model"]
     assert "available_models" in body
     assert isinstance(body["hardware"]["cuda_available"], bool)
 
@@ -393,9 +413,7 @@ def test_status_endpoint_reports_terminal_state(client: TestClient, tmp_path: Pa
     assert formats == {"json", "txt", "srt", "vtt"}
 
 
-def test_web_canonical_json_artifact_exposes_v2(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_web_canonical_json_artifact_exposes_v2(client: TestClient, tmp_path: Path) -> None:
     wav = tmp_path / "v2.wav"
     _silence_wav(wav)
     up = client.post(
@@ -428,23 +446,71 @@ def test_web_canonical_json_artifact_exposes_v2(
     assert first_segment["words"] == []
 
 
-def test_web_job_creation_has_no_new_options(client: TestClient) -> None:
-    # The create-job request contract stays exactly {media_id, language,
-    # model_override}; Stage C owns engine/stage/word options, so none of
-    # them may appear in the API schema yet.
+def test_editor_save_preserves_raw_artifact_and_rejects_stale_revision(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    wav = tmp_path / "editor.wav"
+    _silence_wav(wav)
+    upload = client.post(
+        "/api/media",
+        files={"file": ("editor.wav", wav.open("rb"), "audio/wav")},
+    )
+    media_id = upload.json()["media"]["id"]
+    created = client.post("/api/jobs", json={"media_id": media_id})
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    detail = _wait_for_status(client, job_id, JobStatus.COMPLETED)
+    json_art = next(a for a in detail["artifacts"] if a["format"] == "json")
+    raw_before = client.get(f"/api/artifacts/{json_art['id']}").json()
+
+    loaded = client.get(f"/api/jobs/{job_id}/editor")
+    assert loaded.status_code == 200
+    document = loaded.json()
+    assert document["revision"] == 0
+    segment = document["segments"][0]
+    changed = client.put(
+        f"/api/jobs/{job_id}/editor",
+        json={
+            "base_revision": 0,
+            "edits": [{"segment_id": segment["id"], "text": "исправленный текст"}],
+        },
+    )
+    assert changed.status_code == 200
+    assert changed.json()["revision"] == 1
+    assert changed.json()["segments"][0]["text"] == "исправленный текст"
+    assert changed.json()["segments"][0]["raw_text"] == segment["raw_text"]
+
+    stale = client.put(
+        f"/api/jobs/{job_id}/editor",
+        json={
+            "base_revision": 0,
+            "edits": [{"segment_id": segment["id"], "text": "stale"}],
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "EDITOR_CONFLICT"
+
+    raw_after = client.get(f"/api/artifacts/{json_art['id']}").json()
+    assert raw_after == raw_before
+
+
+def test_web_job_creation_exposes_engine_option(client: TestClient) -> None:
     schema = client.app.openapi()
     create_op = schema["paths"]["/api/jobs"]["post"]
     ref = create_op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     ref_name = ref.rsplit("/", 1)[-1]
     props = schema["components"]["schemas"][ref_name]["properties"]
-    assert {"language", "model_override"} <= set(props)
-    for forbidden in ("word_timestamps", "engine", "diarize", "polish"):
-        assert forbidden not in props
+    assert {
+        "engine",
+        "diarization",
+        "polish",
+        "polish_model",
+        "polish_full_transcript",
+    } <= set(props)
 
 
-def test_cancel_is_idempotent_on_terminal_job(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_cancel_is_idempotent_on_terminal_job(client: TestClient, tmp_path: Path) -> None:
     wav = tmp_path / "z.wav"
     _silence_wav(wav)
     up = client.post(
@@ -464,9 +530,7 @@ def test_cancel_is_idempotent_on_terminal_job(
     assert r2.json()["error"]["code"] == "CANCEL_DENIED"
 
 
-def test_create_job_with_unknown_model_returns_409(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_create_job_with_unknown_model_returns_409(client: TestClient, tmp_path: Path) -> None:
     wav = tmp_path / "k.wav"
     _silence_wav(wav)
     up = client.post(
@@ -486,9 +550,7 @@ def test_create_job_with_unknown_model_returns_409(
         assert r.json()["error"]["code"] == "MODEL_NOT_AVAILABLE"
 
 
-def test_artifact_download_uses_artifact_id(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_artifact_download_uses_artifact_id(client: TestClient, tmp_path: Path) -> None:
     wav = tmp_path / "d.wav"
     _silence_wav(wav)
     up = client.post(
@@ -509,9 +571,72 @@ def test_artifact_download_uses_artifact_id(
     assert "привет мир" in rr.text
 
 
-def test_error_responses_never_leak_absolute_paths(
-    client: TestClient, tmp_path: Path
+def test_speaker_txt_download_uses_speaker_filename(
+    tmp_path: Path,
 ) -> None:
+    from lecture_transcriber.domain.ports import DiarizationResult
+
+    class _FakeDiarization:
+        def prepare(self, options, is_cancelled) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def diarize(self, media_path, options, is_cancelled):  # type: ignore[no-untyped-def]
+            return DiarizationResult(
+                turns=(),
+                engine_name="fake-diarization",
+                model_name="fake-model",
+            )
+
+        def close(self) -> None:
+            return None
+
+    settings = Settings(data_dir=tmp_path)
+    settings.ensure_directories()
+    container, _sf, _cache = _build_container(
+        settings,
+        diarization_factory=lambda options: _FakeDiarization(),
+    )
+
+    def _factory(s: Settings) -> ApplicationContainer:
+        return container
+
+    app = create_app(settings=settings, container_factory=_factory)
+    worker = LocalWorker(
+        job_repo=container.job_repo,
+        runner=container.run_job,
+        poll_interval_seconds=0.01,
+    )
+    thread = threading.Thread(target=worker.run_forever, daemon=True)
+    thread.start()
+    with TestClient(app) as c:
+        c.app.state.worker = worker
+        c.app.state.worker_thread = thread
+        wav = tmp_path / "spk.wav"
+        _silence_wav(wav)
+        up = c.post(
+            "/api/media",
+            files={"file": ("spk.wav", wav.open("rb"), "audio/wav")},
+        )
+        media_id = up.json()["media"]["id"]
+        r = c.post(
+            "/api/jobs",
+            content=json.dumps({"media_id": media_id, "diarization": "pyannote"}),
+            headers={"content-type": "application/json"},
+        )
+        job_id = r.json()["id"]
+        detail = _wait_for_status(c, job_id, JobStatus.COMPLETED)
+        formats = {a["format"] for a in detail["artifacts"]}
+        assert "speaker_txt" in formats
+        speaker_txt = next(a for a in detail["artifacts"] if a["format"] == "speaker_txt")
+        rr = c.get(f"/api/artifacts/{speaker_txt['id']}")
+        assert rr.status_code == 200
+        assert rr.headers["content-disposition"].endswith('filename="speaker.txt"')
+        assert rr.text.startswith("[")
+    worker.stop()
+    thread.join(timeout=2.0)
+
+
+def test_error_responses_never_leak_absolute_paths(client: TestClient, tmp_path: Path) -> None:
     bogus = uuid4()
     r = client.get(f"/api/jobs/{bogus}")
     assert r.status_code == 404

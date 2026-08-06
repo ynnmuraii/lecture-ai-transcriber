@@ -36,14 +36,11 @@ class ExportTranscriptService:
     def export(self, job_id: UUID, fmt: str, transcript: Transcript) -> StoredArtifact:
         if fmt not in _FORMATTERS:
             raise ExportFailed(
-                f"format {fmt!r} is not supported; "
-                "use one of " + ", ".join(sorted(_FORMATTERS))
+                f"format {fmt!r} is not supported; use one of " + ", ".join(sorted(_FORMATTERS))
             )
         content = _FORMATTERS[fmt](transcript)
         content_bytes = content.encode("utf-8") if isinstance(content, str) else content
-        stored = self._file_store.write_artifact_atomic(
-            job_id, f"transcript.{fmt}", content_bytes
-        )
+        stored = self._file_store.write_artifact_atomic(job_id, f"transcript.{fmt}", content_bytes)
         return stored
 
     def export_all(

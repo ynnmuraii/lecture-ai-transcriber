@@ -7,13 +7,15 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, inspect
+from sqlalchemy import event, inspect, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from lecture_transcriber.domain.enums import JobStatus
-from lecture_transcriber.domain.errors import InvalidStateTransition
+from lecture_transcriber.domain.errors import EditorConflict, InvalidStateTransition
 from lecture_transcriber.domain.models import (
     Artifact,
+    EditorEdit,
     JobEvent,
     Media,
     MediaType,
@@ -21,9 +23,11 @@ from lecture_transcriber.domain.models import (
     TranscriptionOptions,
 )
 from lecture_transcriber.infrastructure.database import create_engine, initialize_database
+from lecture_transcriber.infrastructure.migrations import migrate_database
 from lecture_transcriber.infrastructure.repositories import (
     SessionFactory,
     SqlArtifactRepository,
+    SqlEditorRepository,
     SqlJobEventRepository,
     SqlJobRepository,
     SqlMediaRepository,
@@ -158,10 +162,50 @@ def test_database_has_schema_version_indexes_and_constraints(session_factory) ->
     assert "ix_artifacts_job_id" in artifact_indexes
 
     artifact_uniques = {
-        tuple(item["column_names"])
-        for item in inspector.get_unique_constraints("artifacts")
+        tuple(item["column_names"]) for item in inspector.get_unique_constraints("artifacts")
     }
     assert ("job_id", "format") in artifact_uniques
+
+
+def test_editor_revision_history_survives_restart_and_rejects_stale_save(
+    session_factory,
+) -> None:
+    media_repo = SqlMediaRepository(session_factory)
+    media = _make_media()
+    media_repo.add(media)
+    job = TranscriptionJob(id=uuid4(), media_id=media.id)
+    SqlJobRepository(session_factory).add(job)
+
+    occurred_at = datetime(2026, 6, 7, tzinfo=UTC)
+    repo = SqlEditorRepository(session_factory)
+    initial = repo.get_or_create(job.id, "b" * 64, occurred_at)
+    assert initial.revision == 0
+
+    saved = repo.append_revision(
+        job.id,
+        "b" * 64,
+        0,
+        (EditorEdit(segment_id="segment-0", text="corrected"),),
+        occurred_at,
+    )
+    assert saved.revision == 1
+    assert saved.edits == (EditorEdit(segment_id="segment-0", text="corrected"),)
+    assert [item.revision for item in saved.history] == [1]
+
+    with pytest.raises(EditorConflict):
+        repo.append_revision(
+            job.id,
+            "b" * 64,
+            0,
+            (EditorEdit(segment_id="segment-0", text="stale"),),
+            occurred_at,
+        )
+
+    reopened = SqlEditorRepository(session_factory)
+    persisted = reopened.get_or_create(job.id, "b" * 64, occurred_at)
+    assert persisted.revision == 1
+    assert persisted.edits == saved.edits
+    assert persisted.history == saved.history
 
 
 def test_add_job_with_event_is_atomic_success_path(session_factory) -> None:
@@ -267,6 +311,82 @@ def test_duplicate_artifact_format_for_job_is_rejected(session_factory) -> None:
         repo.add(_make_artifact(job_id, "json"))
 
 
+def test_legacy_database_migrates_to_speaker_txt_format(data_dir: Path) -> None:
+    """An existing artifacts table without ``speaker_txt`` is rebuilt, data kept."""
+    engine = create_engine_for(data_dir)
+    initialize_database(engine)
+    sf = SessionFactory(engine)
+    media = _make_media()
+    SqlMediaRepository(sf).add(media)
+    job_id = uuid4()
+    SqlJobRepository(sf).add(TranscriptionJob(id=job_id, media_id=media.id))
+    legacy = _make_artifact(job_id, "speaker")
+    SqlArtifactRepository(sf).add(legacy)
+
+    # Simulate a pre-v3 database: rebuild artifacts with the old constraint.
+    with Session(engine) as session:
+        session.execute(text("DROP INDEX IF EXISTS ix_artifacts_job_id"))
+        session.execute(text("ALTER TABLE artifacts RENAME TO artifacts_old"))
+        session.execute(
+            text(
+                """
+                CREATE TABLE artifacts (
+                    id VARCHAR(36) NOT NULL,
+                    job_id VARCHAR(36) NOT NULL,
+                    format VARCHAR(8) NOT NULL,
+                    relative_path VARCHAR(1024) NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    sha256 VARCHAR(64) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT ck_artifacts_format CHECK (
+                        format IN ('json','txt','srt','vtt','speaker','polished','editor')
+                    ),
+                    CONSTRAINT uq_artifacts_job_format UNIQUE (job_id, format),
+                    FOREIGN KEY(job_id) REFERENCES jobs(id)
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                INSERT INTO artifacts (
+                    id, job_id, format, relative_path, size_bytes, sha256, created_at
+                )
+                SELECT id, job_id, format, relative_path, size_bytes, sha256, created_at
+                FROM artifacts_old
+                """
+            )
+        )
+        session.execute(text("DROP TABLE artifacts_old"))
+        session.execute(text("CREATE INDEX ix_artifacts_job_id ON artifacts (job_id)"))
+        session.execute(text("DELETE FROM schema_migrations WHERE version = 3"))
+        session.commit()
+
+    migrate_database(engine)
+
+    repo = SqlArtifactRepository(SessionFactory(engine))
+    assert [artifact.format for artifact in repo.list_for_job(job_id)] == ["speaker"]
+    repo.add(_make_artifact(job_id, "speaker_txt"))
+    assert {artifact.format for artifact in repo.list_for_job(job_id)} == {
+        "speaker",
+        "speaker_txt",
+    }
+
+
+def test_speaker_txt_artifact_round_trip(session_factory) -> None:
+    media_repo = SqlMediaRepository(session_factory)
+    media = _make_media()
+    media_repo.add(media)
+    job_id = uuid4()
+    SqlJobRepository(session_factory).add(TranscriptionJob(id=job_id, media_id=media.id))
+
+    repo = SqlArtifactRepository(session_factory)
+    repo.add(_make_artifact(job_id, "speaker_txt"))
+
+    assert [artifact.format for artifact in repo.list_for_job(job_id)] == ["speaker_txt"]
+
+
 def test_job_completion_publishes_state_event_and_artifacts_atomically(
     session_factory,
 ) -> None:
@@ -283,10 +403,7 @@ def test_job_completion_publishes_state_event_and_artifacts_atomically(
     job_repo.save_progress(job.id, JobStatus.TRANSCRIBING, 60, "transcribing")
     job_repo.save_progress(job.id, JobStatus.VALIDATING, 92, "validating")
     job_repo.save_progress(job.id, JobStatus.EXPORTING, 95, "exporting")
-    artifacts = tuple(
-        _make_artifact(job.id, fmt)
-        for fmt in ("json", "txt", "srt", "vtt")
-    )
+    artifacts = tuple(_make_artifact(job.id, fmt) for fmt in ("json", "txt", "srt", "vtt"))
     completion_event = JobEvent(
         id=uuid4(),
         job_id=job.id,
@@ -357,10 +474,7 @@ def test_job_completion_rolls_back_state_when_artifact_insert_fails(
     assert current is not None
     assert current.status == JobStatus.EXPORTING
     assert artifact_repo.list_for_job(job.id) == ()
-    assert all(
-        event.status != JobStatus.COMPLETED
-        for event in event_repo.list_for_job(job.id)
-    )
+    assert all(event.status != JobStatus.COMPLETED for event in event_repo.list_for_job(job.id))
 
 
 def _make_artifact(job_id, fmt: str) -> Artifact:

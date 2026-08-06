@@ -13,6 +13,7 @@
     <dt>Cancel requested</dt><dd id="job-cancel">…</dd>
   </dl>
   <div class="actions">
+    <a class="button-link" href="/jobs/{{ job_id }}/editor">Open transcript editor</a>
     <button id="cancel-btn" type="button">Cancel job</button>
     <button id="retry-btn" type="button" hidden>Retry</button>
   </div>
@@ -21,8 +22,14 @@
 
 <section class="card">
   <h2>Segments</h2>
+  <p class="hint">Raw timing and words are immutable; text edits are derived revisions.</p>
+  <div class="actions">
+    <button id="save-editor" type="button" disabled>Save revision</button>
+    <span id="editor-revision" class="status"></span>
+  </div>
+  <p id="editor-error" class="error" hidden></p>
   <table class="segments">
-    <thead><tr><th>#</th><th>Start</th><th>End</th><th>Text</th><th>Warn</th></tr></thead>
+    <thead><tr><th>#</th><th>Time</th><th>Speaker</th><th>Text</th><th>Raw warning</th></tr></thead>
     <tbody id="segments-body"></tbody>
   </table>
   <p class="hint" id="segments-empty">No segments yet.</p>

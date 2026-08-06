@@ -17,6 +17,11 @@ import typer
 from pydantic import ValidationError
 
 from lecture_transcriber.bootstrap import ApplicationContainer
+from lecture_transcriber.domain.enums import (
+    ASREngineChoice,
+    DiarizationBackend,
+    PolishBackend,
+)
 from lecture_transcriber.infrastructure.config import Settings
 from lecture_transcriber.transcription.faster_whisper_engine import (
     FasterWhisperEngine,
@@ -32,6 +37,38 @@ models_app = typer.Typer(help="Manage cached ASR models.")
 jobs_app = typer.Typer(help="Inspect and manage transcription jobs.")
 app.add_typer(models_app, name="models")
 app.add_typer(jobs_app, name="jobs")
+
+_OPT_ENGINE_DOWNLOAD = typer.Option(
+    ASREngineChoice.FASTER_WHISPER,
+    "--engine",
+    help="ASR engine whose model should be provisioned.",
+)
+_OPT_ENGINE_TRANSCRIBE = typer.Option(
+    ASREngineChoice.AUTO,
+    "--engine",
+    help="ASR engine: auto/faster-whisper/gigaam.",
+)
+_OPT_MODEL = typer.Option(None, "--model")
+_OPT_MODEL_DOWNLOAD = typer.Option(
+    None,
+    "--model",
+    help="Model name (preferred when using --engine gigaam).",
+)
+_OPT_DIARIZATION = typer.Option(
+    DiarizationBackend.OFF,
+    "--diarization",
+    help="Speaker diarization: off/pyannote.",
+)
+_OPT_POLISH = typer.Option(
+    PolishBackend.OFF,
+    "--polish",
+    help="Derived local polishing: off/ollama.",
+)
+_OPT_POLISH_MODEL = typer.Option(
+    "",
+    "--polish-model",
+    help="Local Ollama model tag.",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +105,10 @@ def doctor(
     container = _container()
     facts = container.hardware.detect()
     available = [m.name for m in container.model_cache.list_models()]
+    default_model = container.profiles.select(
+        facts,
+        engine=ASREngineChoice.AUTO,
+    ).model
     payload: dict[str, Any] = {
         "data_dir": str(container.settings.data_dir),
         "offline": container.settings.offline,
@@ -79,7 +120,9 @@ def doctor(
             "vram_bytes": facts.vram_bytes,
         },
         "available_models": available,
-        "asr_engine": "faster-whisper",
+        "asr_engine": ASREngineChoice.AUTO.value,
+        "asr_engines": [choice.value for choice in ASREngineChoice],
+        "default_model": default_model,
     }
     if json_output:
         _emit_json(payload)
@@ -89,45 +132,79 @@ def doctor(
 
 
 @models_app.command("list")
-def models_list(json_output: bool = typer.Option(False, "--json")) -> None:
+def models_list(
+    json_output: bool = typer.Option(False, "--json"),
+    engine: ASREngineChoice = _OPT_ENGINE_DOWNLOAD,
+) -> None:
     container = _container()
-    available = container.model_cache.list_models()
+    if engine == ASREngineChoice.GIGAAM:
+        from lecture_transcriber.transcription.gigaam_engine import (
+            list_cached_gigaam_models,
+        )
+
+        available = list_cached_gigaam_models(container.settings.model_dir)
+    else:
+        available = [m.name for m in container.model_cache.list_models()]
     if json_output:
-        _emit_json({"models": [m.name for m in available]})
+        _emit_json({"engine": engine.value, "models": available})
         return
     if not available:
         typer.echo("(no cached models)")
         return
     for m in available:
-        typer.echo(m.name)
+        typer.echo(m)
 
 
 @models_app.command("download")
-def models_download(model: str) -> None:
-    """Download a faster-whisper model into the local cache.
+def models_download(
+    model: str | None = typer.Argument(None, help="faster-whisper model name"),
+    engine: ASREngineChoice = _OPT_ENGINE_DOWNLOAD,
+    model_option: str | None = _OPT_MODEL_DOWNLOAD,
+) -> None:
+    """Explicitly provision a local ASR model."""
+    model_name = model_option or model
+    if not model_name:
+        _err("INVALID_INPUT", "provide a model name or --model <name>")
 
-    The command always goes online — it is the *only* place in the codebase
-    that is allowed to make network requests for the model itself, so the
-    ``offline`` setting cannot block it.
-    """
     container = _container()
     settings = container.settings
     settings.ensure_directories()
+    if engine == ASREngineChoice.GIGAAM:
+        try:
+            from lecture_transcriber.domain.errors import ModelLoadFailed
+            from lecture_transcriber.transcription.gigaam_engine import (
+                provision_gigaam_model,
+            )
+
+            provision_gigaam_model(
+                cache_dir=settings.model_dir,
+                model_name=model_name,
+            )
+        except ModelLoadFailed as exc:
+            _err(
+                "MODEL_PROVISION_FAILED",
+                str(exc),
+                action=(
+                    "install the optional GigaAM runtime and retry "
+                    "models download --engine gigaam --model <name>"
+                ),
+            )
+        typer.echo(f"downloaded: {model_name}")
+        return
+
     try:
         from faster_whisper import WhisperModel  # type: ignore[import-untyped]
     except Exception as exc:  # pragma: no cover - import guard
         _err("ASR_IMPORT_FAILED", f"failed to import faster_whisper: {exc}")
-    typer.echo(f"downloading {model} into {settings.model_dir} …")
-    # local_files_only=False forces a download even when the host is in
-    # offline mode for transcription.
+    typer.echo(f"downloading {model_name} into {settings.model_dir} …")
     WhisperModel(
-        model,
+        model_name,
         device="cpu",
         compute_type="int8",
         download_root=str(settings.model_dir),
         local_files_only=False,
     )
-    typer.echo(f"downloaded: {model}")
+    typer.echo(f"downloaded: {model_name}")
 
 
 @app.command("import")
@@ -141,6 +218,16 @@ def import_media(path: Path) -> None:
 def transcribe(
     target: str = typer.Argument(..., help="Path to a media file or a media UUID."),
     language: str = typer.Option("ru", "--language", "-l"),
+    engine: ASREngineChoice = _OPT_ENGINE_TRANSCRIBE,
+    model: str | None = _OPT_MODEL,
+    diarization: DiarizationBackend = _OPT_DIARIZATION,
+    polish: PolishBackend = _OPT_POLISH,
+    polish_model: str = _OPT_POLISH_MODEL,
+    polish_full_transcript: bool = typer.Option(
+        False,
+        "--polish-full-transcript",
+        help="Send every segment to local polish instead of review flags only.",
+    ),
     wait: bool = typer.Option(True, "--wait/--no-wait"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -161,7 +248,18 @@ def transcribe(
         media = existing
     from lecture_transcriber.domain.models import TranscriptionOptions
 
-    summary = container.create_job.create(media.id, TranscriptionOptions(language=language))
+    summary = container.create_job.create(
+        media.id,
+        TranscriptionOptions(
+            language=language,
+            model_override=model,
+            engine=engine,
+            diarization=diarization,
+            polish=polish,
+            polish_model=polish_model,
+            polish_full_transcript=polish_full_transcript,
+        ),
+    )
     if wait:
         container.run_job.run_job(summary.id)
     if json_output:
@@ -172,6 +270,8 @@ def transcribe(
             {
                 "job_id": str(summary.id),
                 "status": detail.status.value,
+                "engine": detail.engine.value,
+                "effective_model": detail.effective_model,
                 "artifacts": [a.relative_path for a in detail.artifacts],
             }
         )
@@ -195,6 +295,8 @@ def jobs_list(
                         "status": s.status.value,
                         "progress": s.progress,
                         "media_name": s.media_name,
+                        "engine": s.engine.value,
+                        "effective_model": s.effective_model,
                     }
                     for s in items
                 ]
@@ -227,12 +329,15 @@ def jobs_show(
                 "stage_message": detail.stage_message,
                 "error_code": detail.error_code,
                 "error_message": detail.error_message,
+                "engine": detail.engine.value,
+                "effective_model": detail.effective_model,
                 "artifacts": [a.relative_path for a in detail.artifacts],
                 "events": [e.status.value for e in detail.events],
             }
         )
         return
     typer.echo(f"job {detail.id}  status={detail.status.value}  progress={detail.progress}%")
+    typer.echo(f"  engine: {detail.engine.value}  model: {detail.effective_model or '(unknown)'}")
     for a in detail.artifacts:
         typer.echo(f"  artifact: {a.relative_path}")
 
@@ -272,7 +377,7 @@ def export_artifact(
         _err(
             "ARTIFACT_NOT_FOUND",
             f"no {fmt!r} artifact for job {job_id}",
-            action="export --format json|txt|srt|vtt",
+            action="export --format json|txt|srt|vtt|speaker|speaker_txt|polished|editor",
         )
     path = container.file_store.resolve_artifact(artifact.relative_path)
     if output is not None:

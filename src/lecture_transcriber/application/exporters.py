@@ -319,8 +319,7 @@ def _parse_segments(
             expected = str(uuid5(job_id, f"segment:{index}"))
             if seg_id != expected:
                 raise ValueError(
-                    f"segment id mismatch at {seg_path}: "
-                    f"expected {expected!r}, got {seg_id!r}"
+                    f"segment id mismatch at {seg_path}: expected {expected!r}, got {seg_id!r}"
                 )
             words = _parse_words(seg["words"], f"{seg_path}.words")
         else:
@@ -332,9 +331,7 @@ def _parse_segments(
                 end=_require_float(seg, "end", seg_path),
                 text=_require_str(seg, "text", seg_path),
                 avg_logprob=_require_optional_float(seg, "avg_logprob", seg_path),
-                compression_ratio=_require_optional_float(
-                    seg, "compression_ratio", seg_path
-                ),
+                compression_ratio=_require_optional_float(seg, "compression_ratio", seg_path),
                 no_speech_prob=_require_optional_float(seg, "no_speech_prob", seg_path),
                 temperature=_require_optional_float(seg, "temperature", seg_path),
                 needs_review=_require_bool(seg, "needs_review", seg_path, default=False),
@@ -376,15 +373,9 @@ def _build_transcript(
         media=_parse_media(data["media"]),
         engine=_parse_engine(data["engine"]),
         language=_parse_language(data["language"]),
-        source_duration_seconds=_require_float(
-            data, "source_duration_seconds", "top-level"
-        ),
-        vad_duration_seconds=_require_optional_float(
-            data, "vad_duration_seconds", "top-level"
-        ),
-        segments=_parse_segments(
-            data["segments"], job_id, require_ids_words=require_ids_words
-        ),
+        source_duration_seconds=_require_float(data, "source_duration_seconds", "top-level"),
+        vad_duration_seconds=_require_optional_float(data, "vad_duration_seconds", "top-level"),
+        segments=_parse_segments(data["segments"], job_id, require_ids_words=require_ids_words),
         warnings=_parse_warnings(data["warnings"]),
         transcript_kind="raw_canonical",
     )
@@ -430,7 +421,6 @@ def parse_canonical(payload: str) -> Transcript:
     reader = _READERS.get(schema_version)
     if reader is None:
         raise ValueError(
-            f"unsupported schema_version {schema_version!r}; "
-            f"supported: {sorted(_READERS)}"
+            f"unsupported schema_version {schema_version!r}; supported: {sorted(_READERS)}"
         )
     return reader(data)

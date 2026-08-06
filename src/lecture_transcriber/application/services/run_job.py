@@ -6,8 +6,9 @@ component that knows the exact ordering of those steps.
 
 It is intentionally a *use case*, not a background loop: the worker (Task 10)
 calls :meth:`RunJobService.run_once` repeatedly. The service is fully
-cooperative with cancellation — it checks the flag after every control point
-and refuses to publish any artifacts if the user asked to cancel.
+cooperative with cancellation — it checks the flag after every control point,
+refuses to publish incomplete raw output, and preserves already-published raw
+artifacts when cancellation arrives during an optional stage.
 """
 
 from __future__ import annotations
@@ -18,17 +19,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from lecture_transcriber.application.polish import build_polish_projection
 from lecture_transcriber.application.services.export_transcript import (
     ExportTranscriptService,
 )
-from lecture_transcriber.domain.enums import ErrorCode, JobStatus
+from lecture_transcriber.application.speakers import (
+    build_speaker_projection,
+    to_speaker_txt,
+)
+from lecture_transcriber.domain.enums import ErrorCode, JobStatus, WarningCode
 from lecture_transcriber.domain.errors import (
     AsrFailed,
+    DiarizationFailed,
     ExportFailed,
     JobCancelled,
     JobLeaseLost,
     MediaProbeFailed,
     ModelLoadFailed,
+    PolishFailed,
 )
 from lecture_transcriber.domain.models import (
     EngineMetadata,
@@ -37,15 +45,20 @@ from lecture_transcriber.domain.models import (
     Media,
     Transcript,
     TranscriptionJob,
+    TranscriptionOptions,
     TranscriptSegment,
 )
 from lecture_transcriber.domain.ports import (
+    ArtifactRepository,
     ASREngine,
     Clock,
+    DiarizationEngine,
     FileStore,
     JobRepository,
     MediaProbe,
     MediaRepository,
+    PolishEngine,
+    StoredArtifact,
 )
 from lecture_transcriber.transcription.validator import (
     ValidationResult,
@@ -83,17 +96,38 @@ class RunJobService:
         media_repo: MediaRepository,
         file_store: FileStore,
         probe: MediaProbe,
-        engine: ASREngine,
+        engine: ASREngine | None = None,
+        engine_factory: Callable[[TranscriptionOptions], ASREngine] | None = None,
         exporter: ExportTranscriptService,
         clock: Clock,
+        artifact_repo: ArtifactRepository | None = None,
+        diarization_factory: Callable[[TranscriptionOptions], DiarizationEngine] | None = None,
+        polish_factory: Callable[[TranscriptionOptions], PolishEngine] | None = None,
+        # CLI --wait has no worker heartbeat while long ASR/optional stages run.
+        inline_lease_seconds: int = 3600,
     ) -> None:
+        if engine is None and engine_factory is None:
+            raise ValueError("either engine or engine_factory must be provided")
+        if inline_lease_seconds <= 0:
+            raise ValueError("inline_lease_seconds must be positive")
         self._job_repo = job_repo
         self._media_repo = media_repo
         self._file_store = file_store
         self._probe = probe
         self._engine = engine
+        self._engine_factory = engine_factory
         self._exporter = exporter
         self._clock = clock
+        self._artifact_repo = artifact_repo
+        self._diarization_factory = diarization_factory
+        self._polish_factory = polish_factory
+        self._inline_lease_seconds = inline_lease_seconds
+
+    def _select_engine(self, options: TranscriptionOptions) -> ASREngine:
+        if self._engine_factory is not None:
+            return self._engine_factory(options)
+        assert self._engine is not None
+        return self._engine
 
     # ------------------------------------------------------------------ entry
 
@@ -123,7 +157,7 @@ class RunJobService:
             claimed = self._job_repo.claim(
                 job_id,
                 worker_id=owner,
-                lease_seconds=120,
+                lease_seconds=self._inline_lease_seconds,
             )
             if claimed is None:
                 raise JobLeaseLost(f"job {job_id} could not be claimed")
@@ -142,6 +176,7 @@ class RunJobService:
         job = self._job_repo.get(job_id)
         if job is None:
             return
+        engine: ASREngine | None = None
         try:
             media = self._media_repo.get(job.media_id)
             if media is None:
@@ -152,10 +187,12 @@ class RunJobService:
                 )
                 return
 
+            engine = self._select_engine(job.options)
             self._step_loading_model(
                 job_id,
                 media,
                 job,
+                engine,
                 worker_id,
                 lease_lost,
             )
@@ -163,6 +200,7 @@ class RunJobService:
                 job_id,
                 media,
                 job,
+                engine,
                 worker_id,
                 lease_lost,
             )
@@ -186,7 +224,33 @@ class RunJobService:
                 source_duration_seconds=media.duration_seconds,
                 vad_duration_seconds=vad_dur,
             )
-            self._step_exporting(job_id, transcript, worker_id, lease_lost)
+            try:
+                raw_stored = self._step_exporting(
+                    job_id,
+                    transcript,
+                    worker_id,
+                    lease_lost,
+                )
+            finally:
+                asr_engine, engine = engine, None
+                if asr_engine is not None:
+                    asr_engine.close()
+            derived_stored, optional_warnings = self._step_optional_stages(
+                job_id,
+                media,
+                transcript,
+                job.options,
+                worker_id,
+                lease_lost,
+            )
+            self._complete(
+                job_id,
+                transcript,
+                raw_stored + derived_stored,
+                optional_warnings,
+                worker_id,
+                lease_lost,
+            )
         except JobLeaseLost:
             raise
         except JobCancelled:
@@ -202,9 +266,9 @@ class RunJobService:
         except Exception as exc:  # last-resort safety net
             self._fail_with(job_id, ErrorCode.INTERNAL_ERROR, str(exc))
         finally:
-            # Always release the ASR engine after a pipeline attempt, whether
-            # it succeeded, was cancelled, or failed at any stage.
-            self._engine.close()
+            # Always release the selected ASR engine after a pipeline attempt.
+            if engine is not None:
+                engine.close()
 
     # ----------------------------------------------------------------- steps
 
@@ -213,6 +277,7 @@ class RunJobService:
         job_id: UUID,
         media: Media,
         job: TranscriptionJob,
+        engine: ASREngine,
         worker_id: str,
         lease_lost: Callable[[], bool],
     ) -> None:
@@ -238,7 +303,7 @@ class RunJobService:
         self._raise_if_stopped(job_id, worker_id, lease_lost)
         if job.effective_profile is None:
             raise ModelLoadFailed("job has no effective hardware profile")
-        self._engine.prepare(
+        engine.prepare(
             job.effective_profile,
             job.options,
             lambda: self._job_repo.is_cancel_requested(job_id),
@@ -256,6 +321,7 @@ class RunJobService:
         job_id: UUID,
         media: Media,
         job: TranscriptionJob,
+        engine: ASREngine,
         worker_id: str,
         lease_lost: Callable[[], bool],
     ) -> tuple[
@@ -276,12 +342,10 @@ class RunJobService:
             if new <= last_progress:
                 return
             last_progress = new
-            self._job_repo.save_progress(
-                job_id, JobStatus.TRANSCRIBING, new, None
-            )
+            self._job_repo.save_progress(job_id, JobStatus.TRANSCRIBING, new, None)
             self._raise_if_stopped(job_id, worker_id, lease_lost)
 
-        result = self._engine.transcribe(
+        result = engine.transcribe(
             path,
             job.options,
             on_segment=on_segment,
@@ -292,9 +356,7 @@ class RunJobService:
             ),
         )
         self._raise_if_stopped(job_id, worker_id, lease_lost)
-        if not result.segments or not any(
-            segment.text.strip() for segment in result.segments
-        ):
+        if not result.segments or not any(segment.text.strip() for segment in result.segments):
             raise AsrFailed("transcription produced no text")
         return (
             result.segments,
@@ -333,39 +395,222 @@ class RunJobService:
         transcript: Transcript,
         worker_id: str,
         lease_lost: Callable[[], bool],
-    ) -> None:
+    ) -> tuple[StoredArtifact, ...]:
         self._advance(
             job_id,
             JobStatus.EXPORTING,
             progress=95,
-            message="writing artifacts",
+            message="writing raw artifacts",
         )
         self._raise_if_stopped(job_id, worker_id, lease_lost)
-        stored = self._exporter.export_all(job_id, transcript)
-        # Decide terminal status.
+
+        # Publish the canonical JSON before any optional runtime is touched.
+        stored: list[StoredArtifact] = [self._exporter.export(job_id, "json", transcript)]
+        self._register_artifact(stored[-1])
+        for fmt in ("txt", "srt", "vtt"):
+            self._raise_if_stopped(job_id, worker_id, lease_lost)
+            item = self._exporter.export(job_id, fmt, transcript)
+            stored.append(item)
+            self._register_artifact(item)
+        return tuple(stored)
+
+    def _step_optional_stages(
+        self,
+        job_id: UUID,
+        media: Media,
+        transcript: Transcript,
+        options: TranscriptionOptions,
+        worker_id: str,
+        lease_lost: Callable[[], bool],
+    ) -> tuple[tuple[StoredArtifact, ...], bool]:
+        derived: list[StoredArtifact] = []
+        has_warnings = False
+
+        if options.diarization.value != "off":
+            self._advance(
+                job_id,
+                JobStatus.DIARIZING,
+                progress=96,
+                message="assigning speakers",
+            )
+            diarization_engine: DiarizationEngine | None = None
+            try:
+                if self._diarization_factory is None:
+                    raise DiarizationFailed(
+                        "pyannote diarization is not configured in this application"
+                    )
+                diarization_engine = self._diarization_factory(options)
+                diarization_engine.prepare(
+                    options,
+                    lambda: self._job_repo.is_cancel_requested(job_id),
+                )
+                result = diarization_engine.diarize(
+                    self._file_store.resolve_media(media.stored_path),
+                    options,
+                    lambda: self._job_repo.is_cancel_requested(job_id),
+                )
+                projection = build_speaker_projection(
+                    transcript,
+                    result.turns,
+                    diarization_engine=result.engine_name,
+                    model_name=result.model_name,
+                )
+                item = self._file_store.write_artifact_atomic(
+                    job_id,
+                    "speaker.json",
+                    projection.json().encode("utf-8"),
+                )
+                derived.append(item)
+                self._register_artifact(item)
+                speaker_txt_item = self._file_store.write_artifact_atomic(
+                    job_id,
+                    "speaker.txt",
+                    to_speaker_txt(projection).encode("utf-8"),
+                )
+                derived.append(speaker_txt_item)
+                self._register_artifact(speaker_txt_item)
+            except JobLeaseLost:
+                raise
+            except JobCancelled:
+                raise
+            except Exception as exc:
+                self._record_optional_warning(
+                    job_id,
+                    JobStatus.DIARIZING,
+                    WarningCode.DIARIZATION_FAILED,
+                    str(exc),
+                )
+                has_warnings = True
+            finally:
+                if diarization_engine is not None:
+                    diarization_engine.close()
+
+        if options.polish.value != "off":
+            self._advance(
+                job_id,
+                JobStatus.POLISHING,
+                progress=98,
+                message="polishing derived text",
+            )
+            polish_engine: PolishEngine | None = None
+            try:
+                from lecture_transcriber.transcription.ollama_polish import (
+                    build_polish_request,
+                )
+
+                request = build_polish_request(
+                    transcript,
+                    model=options.polish_model or "t-tech/T-lite-it-2.1:q4_k_m",
+                    full=options.polish_full_transcript,
+                )
+                if request.segments:
+                    if self._polish_factory is None:
+                        raise PolishFailed("Ollama polishing is not configured in this application")
+                    polish_engine = self._polish_factory(options)
+                    polish_engine.prepare(
+                        options,
+                        lambda: self._job_repo.is_cancel_requested(job_id),
+                    )
+                    results = polish_engine.polish(
+                        request,
+                        lambda: self._job_repo.is_cancel_requested(job_id),
+                    )
+                else:
+                    results = ()
+                polish_projection = build_polish_projection(
+                    transcript,
+                    results,
+                    model=request.model,
+                    full_transcript=options.polish_full_transcript,
+                )
+                item = self._file_store.write_artifact_atomic(
+                    job_id,
+                    "polished.json",
+                    polish_projection.json().encode("utf-8"),
+                )
+                derived.append(item)
+                self._register_artifact(item)
+            except JobLeaseLost:
+                raise
+            except JobCancelled:
+                raise
+            except Exception as exc:
+                self._record_optional_warning(
+                    job_id,
+                    JobStatus.POLISHING,
+                    WarningCode.POLISH_FAILED,
+                    str(exc),
+                )
+                has_warnings = True
+            finally:
+                if polish_engine is not None:
+                    polish_engine.close()
+
+        return tuple(derived), has_warnings
+
+    def _complete(
+        self,
+        job_id: UUID,
+        transcript: Transcript,
+        stored: tuple[StoredArtifact, ...],
+        optional_warnings: bool,
+        worker_id: str,
+        lease_lost: Callable[[], bool],
+    ) -> None:
+        # Optional failures after raw output are warnings; cancellation is
+        # re-raised by the optional-stage loop and handled as CANCELLED.
+        if lease_lost() or not self._job_repo.owns_active_lease(job_id, worker_id):
+            raise JobLeaseLost(f"worker {worker_id} lost lease for job {job_id}")
         has_warnings = bool(
-            transcript.warnings
+            optional_warnings
+            or transcript.warnings
             or any(seg.needs_review for seg in transcript.segments)
         )
-        terminal = (
-            JobStatus.COMPLETED_WITH_WARNINGS
-            if has_warnings
-            else JobStatus.COMPLETED
-        )
+        terminal = JobStatus.COMPLETED_WITH_WARNINGS if has_warnings else JobStatus.COMPLETED
         completion_event = JobEvent(
             id=uuid4(),
             job_id=job_id,
             occurred_at=_utcnow(self._clock),
             status=terminal,
-            message=None,
+            message=("completed with optional-stage warnings" if optional_warnings else None),
             error_code=None,
         )
-        self._raise_if_stopped(job_id, worker_id, lease_lost)
+        artifacts = (
+            () if self._artifact_repo is not None else tuple(item.artifact for item in stored)
+        )
         self._job_repo.complete_with_artifacts(
             job_id,
             terminal,
-            tuple(item.artifact for item in stored),
+            artifacts,
             completion_event,
+        )
+
+    def _register_artifact(self, stored: StoredArtifact) -> None:
+        if self._artifact_repo is not None:
+            self._artifact_repo.add(stored.artifact)
+
+    def _record_optional_warning(
+        self,
+        job_id: UUID,
+        status: JobStatus,
+        code: WarningCode,
+        message: str,
+    ) -> None:
+        safe_message = _redact(message)
+        event = JobEvent(
+            id=uuid4(),
+            job_id=job_id,
+            occurred_at=_utcnow(self._clock),
+            status=status,
+            message=safe_message,
+            error_code=code.value,
+        )
+        self._job_repo.save_progress_with_event(
+            job_id,
+            status,
+            self._last_progress(job_id),
+            safe_message,
+            event,
         )
 
     # -------------------------------------------------------------- internals

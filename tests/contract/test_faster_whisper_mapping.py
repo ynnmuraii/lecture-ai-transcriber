@@ -187,9 +187,7 @@ def test_mapping_maps_sdk_words_to_transcript_word_tuple() -> None:
 def test_mapping_missing_or_none_words_maps_to_empty_tuple() -> None:
     seg = _to_domain_segment(_sdk_segment(start=0.0, end=1.0, text="ok"), index=0)
     assert seg.words == ()
-    seg_none = _to_domain_segment(
-        _sdk_segment(start=0.0, end=1.0, text="ok", words=None), index=0
-    )
+    seg_none = _to_domain_segment(_sdk_segment(start=0.0, end=1.0, text="ok", words=None), index=0)
     assert seg_none.words == ()
 
 
@@ -254,9 +252,7 @@ def _profile(
 def test_prepare_uses_selected_hardware_profile_and_local_cache(
     tmp_path: Path,
 ) -> None:
-    runtime = _FakeRuntime(
-        segments=(_sdk_segment(start=0.0, end=1.0, text="a"),)
-    )
+    runtime = _FakeRuntime(segments=(_sdk_segment(start=0.0, end=1.0, text="a"),))
     engine = FasterWhisperEngine(
         model_dir=tmp_path,
         offline=False,
@@ -334,8 +330,10 @@ def test_changed_model_triggers_reload(tmp_path: Path) -> None:
     engine = FasterWhisperEngine(model_dir=tmp_path, offline=True, runtime_factory=factory)
     engine.transcribe(tmp_path / "a.wav", _options(), lambda _s: None, lambda: False)
     engine.transcribe(
-        tmp_path / "a.wav", _options(model_override="medium"),
-        lambda _s: None, lambda: False,
+        tmp_path / "a.wav",
+        _options(model_override="medium"),
+        lambda _s: None,
+        lambda: False,
     )
     assert engine._model_name == "medium"  # type: ignore[attr-defined]
 
@@ -354,9 +352,7 @@ def test_local_files_only_reflects_offline_setting(tmp_path: Path) -> None:
         offline=False,
         runtime_factory=_factory(online_runtime),
     )
-    engine_offline.transcribe(
-        tmp_path / "a.wav", _options(), lambda _s: None, lambda: False
-    )
+    engine_offline.transcribe(tmp_path / "a.wav", _options(), lambda _s: None, lambda: False)
     assert online_runtime.local_files_only is True
 
 
@@ -380,9 +376,7 @@ def test_cancellation_raises_job_cancelled(tmp_path: Path) -> None:
 
 
 def test_callback_exception_is_not_reclassified_as_asr_failure(tmp_path: Path) -> None:
-    runtime = _FakeRuntime(
-        segments=(_sdk_segment(start=0.0, end=0.5, text="a"),)
-    )
+    runtime = _FakeRuntime(segments=(_sdk_segment(start=0.0, end=0.5, text="a"),))
     engine = FasterWhisperEngine(
         model_dir=tmp_path,
         offline=True,
@@ -441,13 +435,9 @@ def test_model_load_failure_is_wrapped(tmp_path: Path) -> None:
     def factory(*_a: object, **_kw: object) -> object:
         raise RuntimeError("no weights")
 
-    engine = FasterWhisperEngine(
-        model_dir=tmp_path, offline=True, runtime_factory=factory
-    )
+    engine = FasterWhisperEngine(model_dir=tmp_path, offline=True, runtime_factory=factory)
     with pytest.raises(ModelLoadFailed):
-        engine.transcribe(
-            tmp_path / "a.wav", _options(), lambda _s: None, lambda: False
-        )
+        engine.transcribe(tmp_path / "a.wav", _options(), lambda _s: None, lambda: False)
 
 
 def test_transcription_failure_is_wrapped(tmp_path: Path) -> None:
@@ -459,9 +449,7 @@ def test_transcription_failure_is_wrapped(tmp_path: Path) -> None:
         model_dir=tmp_path, offline=True, runtime_factory=lambda *a, **kw: _BoomRuntime()
     )
     with pytest.raises(AsrFailed):
-        engine.transcribe(
-            tmp_path / "a.wav", _options(), lambda _s: None, lambda: False
-        )
+        engine.transcribe(tmp_path / "a.wav", _options(), lambda _s: None, lambda: False)
 
 
 def test_engine_close_drops_loaded_runtime(tmp_path: Path) -> None:

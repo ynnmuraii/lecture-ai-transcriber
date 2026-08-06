@@ -59,9 +59,7 @@ def _transcript() -> Transcript:
             device="cpu",
             compute_type="int8",
         ),
-        language=LanguageMetadata(
-            requested="ru", detected="ru", probability=0.99
-        ),
+        language=LanguageMetadata(requested="ru", detected="ru", probability=0.99),
         segments=(
             TranscriptSegment(
                 index=0,
@@ -96,12 +94,8 @@ def _transcript_v2() -> Transcript:
     seg = replace(
         seg,
         words=(
-            TranscriptWord(
-                index=0, start=0.0, end=0.5, text="Добрый", probability=0.9
-            ),
-            TranscriptWord(
-                index=1, start=0.6, end=1.0, text="день,", probability=0.95
-            ),
+            TranscriptWord(index=0, start=0.0, end=0.5, text="Добрый", probability=0.9),
+            TranscriptWord(index=1, start=0.6, end=1.0, text="день,", probability=0.95),
         ),
     )
     return replace(t, schema_version="2.0", segments=(seg, t.segments[1]))

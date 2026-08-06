@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from lecture_transcriber.bootstrap import ApplicationContainer
 from lecture_transcriber.infrastructure.config import Settings
 from lecture_transcriber.infrastructure.worker import LocalWorker
-from lecture_transcriber.web.routes import artifacts, jobs, media, pages, system
+from lecture_transcriber.web.routes import artifacts, editor, jobs, media, pages, system
 from lecture_transcriber.web.schemas import ErrorBody, ErrorEnvelope
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -35,11 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = app.state.settings
     settings.ensure_directories()
     factory = getattr(app.state, "container_factory", None)
-    container = (
-        ApplicationContainer.default(settings)
-        if factory is None
-        else factory(settings)
-    )
+    container = ApplicationContainer.default(settings) if factory is None else factory(settings)
     app.state.container = container
     app.state.worker = LocalWorker(
         job_repo=container.job_repo,
@@ -107,6 +103,7 @@ def create_app(
     app.include_router(media.router)
     app.include_router(jobs.router)
     app.include_router(artifacts.router)
+    app.include_router(editor.router)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     _register_exception_handlers(app)
     return app

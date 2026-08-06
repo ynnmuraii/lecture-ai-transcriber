@@ -13,23 +13,20 @@ from pathlib import Path
 from lecture_transcriber.domain.errors import ModelNotAvailable
 from lecture_transcriber.domain.ports import CachedModel, ModelCache
 
+_GIGAAM_MODEL_NAMES = (
+    "v3_e2e_rnnt",
+    "multilingual_ctc",
+    "multilingual_large_ctc",
+)
+
 
 def _hf_snapshot_dir(model_dir: Path, model_name: str) -> Path:
-    """Return the directory faster-whisper uses to cache a model.
-
-    ``faster-whisper`` uses ``huggingface_hub`` under the hood, which writes
-    snapshots as ``models--Systran--faster-whisper-<name>`` under the
-    ``download_root``.
-    """
+    """Return the directory faster-whisper uses to cache a model."""
     return model_dir / f"models--Systran--faster-whisper-{model_name}"
 
 
 def _is_model_payload(path: Path) -> bool:
-    return (
-        path.is_dir()
-        and (path / "config.json").is_file()
-        and (path / "model.bin").is_file()
-    )
+    return path.is_dir() and (path / "config.json").is_file() and (path / "model.bin").is_file()
 
 
 def _model_payload_dir(model_dir: Path, model_name: str) -> Path | None:
@@ -43,6 +40,15 @@ def _model_payload_dir(model_dir: Path, model_name: str) -> Path | None:
         if _is_model_payload(candidate):
             return candidate
     return None
+
+
+def _is_gigaam_payload(model_dir: Path, model_name: str) -> bool:
+    checkpoint = model_dir / f"{model_name}.ckpt"
+    if not checkpoint.is_file():
+        return False
+    if "e2e" in model_name:
+        return (model_dir / f"{model_name}_tokenizer.model").is_file()
+    return True
 
 
 class FilesystemModelCache(ModelCache):
@@ -65,7 +71,9 @@ class FilesystemModelCache(ModelCache):
         self._offline = offline
 
     def is_available(self, model: str) -> bool:
-        return _model_payload_dir(self._model_dir, model) is not None
+        return _model_payload_dir(self._model_dir, model) is not None or (
+            model in _GIGAAM_MODEL_NAMES and _is_gigaam_payload(self._model_dir, model)
+        )
 
     def list_models(self) -> tuple[CachedModel, ...]:
         out: list[CachedModel] = []
@@ -75,9 +83,7 @@ class FilesystemModelCache(ModelCache):
                 continue
             if entry.name.startswith("models--Systran--faster-whisper-"):
                 # Translate the HF name back to a user-facing model name.
-                model_name = entry.name.removeprefix(
-                    "models--Systran--faster-whisper-"
-                )
+                model_name = entry.name.removeprefix("models--Systran--faster-whisper-")
                 payload = _model_payload_dir(self._model_dir, model_name)
                 if payload is not None:
                     out.append(
@@ -100,9 +106,24 @@ class FilesystemModelCache(ModelCache):
                         )
                     )
                     seen.add(entry.name)
+        for model_name in _GIGAAM_MODEL_NAMES:
+            if _is_gigaam_payload(self._model_dir, model_name) and model_name not in seen:
+                out.append(
+                    CachedModel(
+                        name=model_name,
+                        size_bytes=None,
+                        path=self._model_dir,
+                    )
+                )
+                seen.add(model_name)
         return tuple(out)
 
     def download(self, model: str) -> CachedModel:
+        if model in _GIGAAM_MODEL_NAMES:
+            raise ModelNotAvailable(
+                "GigaAM provisioning is explicit; run "
+                f"lecture-transcriber models download --engine gigaam --model {model}"
+            )
         if self._offline:
             raise ModelNotAvailable(
                 f"Model {model} is not available locally and the host is in "
@@ -118,9 +139,7 @@ class FilesystemModelCache(ModelCache):
             raise ModelNotAvailable(
                 f"download for model {model!r} did not produce a complete model"
             )
-        return CachedModel(
-            name=model, size_bytes=_dir_size(payload), path=payload
-        )
+        return CachedModel(name=model, size_bytes=_dir_size(payload), path=payload)
 
 
 def _dir_size(path: Path) -> int:

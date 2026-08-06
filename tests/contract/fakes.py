@@ -186,17 +186,13 @@ class InMemoryJobRepository(JobRepository):
         items = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
         return tuple(items[:limit])
 
-    def claim_next(
-        self, worker_id: str, lease_seconds: int
-    ) -> TranscriptionJob | None:
+    def claim_next(self, worker_id: str, lease_seconds: int) -> TranscriptionJob | None:
         for job in sorted(self._jobs.values(), key=lambda j: j.created_at):
             if job.status == JobStatus.QUEUED:
                 job.worker_id = worker_id
                 from datetime import timedelta
 
-                job.lease_expires_at = datetime.now(UTC) + timedelta(
-                    seconds=lease_seconds
-                )
+                job.lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
                 job.transition_to(JobStatus.PROBING)
                 return job
         return None
@@ -316,9 +312,7 @@ class InMemoryJobRepository(JobRepository):
             return False
         from datetime import timedelta
 
-        job.lease_expires_at = datetime.now(UTC) + timedelta(
-            seconds=lease_seconds
-        )
+        job.lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
         return True
 
     def recover_expired_leases(self) -> int:

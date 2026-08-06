@@ -156,22 +156,15 @@ def test_word_out_of_segment_range_adds_warning() -> None:
     result = validate_transcript(segs, media_duration=2.0)
     assert result.segments[0].words == words
     assert result.segments[0].needs_review is True
-    assert (
-        WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE.value
-        in result.segments[0].review_reasons
-    )
-    assert any(
-        w.code == WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE for w in result.warnings
-    )
+    assert WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE.value in result.segments[0].review_reasons
+    assert any(w.code == WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE for w in result.warnings)
 
 
 def test_word_start_before_segment_marks_out_of_range() -> None:
     words = (_word(0, 0.3, 0.7),)
     segs = (_seg(0, 1.0, 2.0, words=words),)
     result = validate_transcript(segs, media_duration=2.0)
-    assert any(
-        w.code == WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE for w in result.warnings
-    )
+    assert any(w.code == WarningCode.WORD_TIMESTAMP_OUT_OF_RANGE for w in result.warnings)
 
 
 def test_fabricated_invalid_word_range_warns_without_crashing() -> None:

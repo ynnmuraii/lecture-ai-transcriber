@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from lecture_transcriber.application.editor import EditorService
 from lecture_transcriber.application.services.cancel_job import CancelJobService
 from lecture_transcriber.application.services.create_job import CreateJobService
 from lecture_transcriber.application.services.export_transcript import (
@@ -19,7 +20,9 @@ from lecture_transcriber.application.services.export_transcript import (
 from lecture_transcriber.application.services.get_job import GetJobService
 from lecture_transcriber.application.services.import_media import ImportMediaService
 from lecture_transcriber.application.services.run_job import RunJobService
-from lecture_transcriber.domain.ports import ASREngine
+from lecture_transcriber.domain.enums import ASREngineChoice
+from lecture_transcriber.domain.models import TranscriptionOptions
+from lecture_transcriber.domain.ports import ASREngine, DiarizationEngine, PolishEngine
 from lecture_transcriber.infrastructure.config import Settings
 from lecture_transcriber.infrastructure.database import (
     create_engine as create_sqlite_engine,
@@ -32,6 +35,7 @@ from lecture_transcriber.infrastructure.model_cache import FilesystemModelCache
 from lecture_transcriber.infrastructure.repositories import (
     SessionFactory,
     SqlArtifactRepository,
+    SqlEditorRepository,
     SqlJobEventRepository,
     SqlJobRepository,
     SqlMediaRepository,
@@ -65,6 +69,10 @@ class ApplicationContainer:
     asr_engine: ASREngine
     run_job: RunJobService
     session_factory: SessionFactory
+    diarization_factory: Callable[[TranscriptionOptions], DiarizationEngine] | None = None
+    polish_factory: Callable[[TranscriptionOptions], PolishEngine] | None = None
+    editor_repo: SqlEditorRepository | None = None
+    editor: EditorService | None = None
 
     @classmethod
     def default(cls, settings: Settings | None = None) -> ApplicationContainer:
@@ -102,17 +110,28 @@ class ApplicationContainer:
         media_probe = PyAVMediaProbe()
         hardware = PsutilHardwareDetector()
         profiles = ProfileSelector()
-        model_cache = FilesystemModelCache(model_dir=settings.model_dir)
+        model_cache = FilesystemModelCache(
+            model_dir=settings.model_dir,
+            offline=settings.offline,
+        )
         media_repo = SqlMediaRepository(session_factory)
         job_repo = SqlJobRepository(session_factory)
         event_repo = SqlJobEventRepository(session_factory)
         artifact_repo = SqlArtifactRepository(session_factory)
+        editor_repo = SqlEditorRepository(session_factory)
         importer = ImportMediaService(file_store, media_probe, media_repo)
         exporter = ExportTranscriptService(file_store)
         # Clock is real in production; tests inject their own.
         from lecture_transcriber.infrastructure.clock import SystemClock
 
         clock = SystemClock()
+        editor = EditorService(
+            job_repo=job_repo,
+            artifact_repo=artifact_repo,
+            file_store=file_store,
+            editor_repo=editor_repo,
+            clock=clock,
+        )
         create_job = CreateJobService(
             media_repo=media_repo,
             job_repo=job_repo,
@@ -130,14 +149,44 @@ class ApplicationContainer:
         )
         cancel_job = CancelJobService(job_repo)
         asr_engine = asr_engine_factory(settings)
+
+        def select_engine(options: TranscriptionOptions) -> ASREngine:
+            return _asr_engine_for_options(settings, options, asr_engine_factory)
+
+        def diarization_factory(_options: TranscriptionOptions) -> DiarizationEngine:
+            from lecture_transcriber.transcription.pyannote_diarization import (
+                PyannoteDiarizationEngine,
+                resolve_diarization_device,
+            )
+
+            return PyannoteDiarizationEngine(
+                model_name=settings.diarization_model,
+                cache_dir=settings.model_dir,
+                device=resolve_diarization_device(settings.diarization_device),
+                allow_download=settings.diarization_allow_download,
+            )
+
+        def polish_factory(options: TranscriptionOptions) -> PolishEngine:
+            from lecture_transcriber.transcription.ollama_polish import OllamaPolishEngine
+
+            return OllamaPolishEngine(
+                endpoint=settings.ollama_endpoint,
+                model=options.polish_model or "t-tech/T-lite-it-2.1:q4_k_m",
+                timeout_seconds=settings.ollama_timeout_seconds,
+            )
+
         run_job = RunJobService(
             job_repo=job_repo,
             media_repo=media_repo,
             file_store=file_store,
             probe=media_probe,
             engine=asr_engine,
+            engine_factory=select_engine,
             exporter=exporter,
             clock=clock,
+            artifact_repo=artifact_repo,
+            diarization_factory=diarization_factory,
+            polish_factory=polish_factory,
         )
         return cls(
             settings=settings,
@@ -150,6 +199,7 @@ class ApplicationContainer:
             job_repo=job_repo,
             event_repo=event_repo,
             artifact_repo=artifact_repo,
+            editor_repo=editor_repo,
             importer=importer,
             exporter=exporter,
             create_job=create_job,
@@ -158,7 +208,22 @@ class ApplicationContainer:
             asr_engine=asr_engine,
             run_job=run_job,
             session_factory=session_factory,
+            diarization_factory=diarization_factory,
+            polish_factory=polish_factory,
+            editor=editor,
         )
+
+
+def _asr_engine_for_options(
+    settings: Settings,
+    options: TranscriptionOptions,
+    default_factory: Callable[[Settings], ASREngine],
+) -> ASREngine:
+    if options.engine == ASREngineChoice.GIGAAM:
+        from lecture_transcriber.transcription.gigaam_engine import GigaAMEngine
+
+        return GigaAMEngine(cache_dir=settings.model_dir)
+    return default_factory(settings)
 
 
 def _default_asr_engine(settings: Settings) -> ASREngine:

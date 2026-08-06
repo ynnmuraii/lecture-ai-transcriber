@@ -65,9 +65,7 @@ def validate_transcript(
                 warnings,
                 TranscriptWarning(
                     code=WarningCode.LOW_AVG_LOGPROB,
-                    message=(
-                        f"segment {seg.index} has low avg_logprob={seg.avg_logprob:.3f}"
-                    ),
+                    message=(f"segment {seg.index} has low avg_logprob={seg.avg_logprob:.3f}"),
                     segment_index=seg.index,
                 ),
             )
@@ -99,8 +97,7 @@ def validate_transcript(
                 TranscriptWarning(
                     code=WarningCode.HIGH_NO_SPEECH_PROBABILITY,
                     message=(
-                        f"segment {seg.index} has high "
-                        f"no_speech_prob={seg.no_speech_prob:.3f}"
+                        f"segment {seg.index} has high no_speech_prob={seg.no_speech_prob:.3f}"
                     ),
                     segment_index=seg.index,
                 ),
@@ -234,11 +231,7 @@ def validate_transcript(
 
 def _is_finite_number(value: object) -> TypeGuard[int | float]:
     """True when ``value`` is a finite real number (not a bool/string)."""
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _add(

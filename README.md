@@ -2,27 +2,37 @@
 
 A **local-first** lecture transcriber: upload an audio or video file in
 the browser (or on the command line), and the application returns a
-canonical JSON transcript plus TXT, SRT, and VTT exports. Everything
-runs on your machine — no cloud, no telemetry, no hidden uploads.
+canonical JSON transcript plus TXT, SRT, and VTT exports. Optional speaker,
+polish, and editor projections are stored separately; everything runs on your
+machine — no cloud, no telemetry, no hidden uploads.
 
-* **ASR engine:** [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper)
-  (CTranslate2 runtime, CPU by default, CUDA when available).
+* **ASR engines:** [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper)
+  remains the `auto` default; explicit `gigaam` uses the local GigaAM-v3
+  adapter.
+* **Optional stages:** local pyannote diarization and loopback Ollama
+  structured-output polishing.
+* **Editor:** browser review UI with optimistic revisions; raw canonical JSON
+  is never overwritten.
 * **Persistence:** local SQLite (WAL) — no external database.
 * **Web UI:** FastAPI + Jinja2 + vanilla JavaScript. No build step.
 * **CLI:** Typer. The CLI and the web app share one application
   container.
 
 The 2.0 rewrite is a clean break from the 1.x pipeline. See
-[`docs/README.md`](docs/README.md) for the architecture and research roadmap.
+[`docs/README.md`](docs/README.md) for the architecture and research roadmap,
+and [`docs/optional-stages.md`](docs/optional-stages.md) for optional runtime
+installation, provisioning, and offline operation.
 
 ## Requirements
-
 * Python **3.11** or **3.12** (tested on both).
 * A working C/C++ toolchain (already required by `faster-whisper`'s
   transitive deps).
 * About **4 GB of free disk** for the smallest usable model
   (`small`); `medium` and `large-v3` need more.
 * Optional: an NVIDIA GPU with CUDA for ~5× speed-up.
+* Optional runtimes are installed separately: `gigaam` for explicit GigaAM,
+  `pyannote.audio` for diarization, and Ollama for local polishing. They are
+  intentionally not base dependencies.
 
 ## Install
 
@@ -76,11 +86,21 @@ The first run needs at least one model cached locally:
 lecture-transcriber models download small
 ```
 
+For GigaAM, diarization, Ollama, and the RTX 4060 sequential lifecycle, see
+[`docs/optional-stages.md`](docs/optional-stages.md).
+
 ## Quick start (CLI)
 
 ```bash
 # Transcribe a file end-to-end (waits for the job to finish).
 lecture-transcriber transcribe path/to/lecture.mp4 --language ru
+
+# Explicitly select an engine; auto remains faster-whisper.
+lecture-transcriber transcribe path/to/lecture.mp4 --engine gigaam --model v3_e2e_rnnt
+
+# Enable optional local stages explicitly.
+lecture-transcriber transcribe path/to/lecture.mp4 \
+  --diarization pyannote --polish ollama --polish-model t-tech/T-lite-it-2.1:q4_k_m
 
 # Show the JSON, TXT, SRT, and VTT paths of the last job.
 lecture-transcriber jobs list
@@ -108,29 +128,34 @@ All settings are environment variables with the
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LECTURE_TRANSCRIBER_DATA_DIR` | `./data` | Where the SQLite DB, models, media, and jobs live. |
-| `LECTURE_TRANSCRIBER_OFFLINE` | `false` | If `true`, never reach out to the network — useful for air-gapped machines. |
+| `LECTURE_TRANSCRIBER_OFFLINE` | `false` | If `true`, job runtime never downloads missing weights or uses a cloud fallback; explicit `models download` remains an operator provisioning command. |
 | `LECTURE_TRANSCRIBER_MAX_UPLOAD_BYTES` | `4294967296` (4 GiB) | Hard limit for the web upload. |
 | `LECTURE_TRANSCRIBER_HOST` | `127.0.0.1` | Bind host for `serve`. |
 | `LECTURE_TRANSCRIBER_PORT` | `8000` | Bind port for `serve`. |
 
-## API surface (HTTP)
-
-| Method | Path | Purpose |
-| --- | --- | --- |
 | GET | `/api/system` | Diagnostics: data dir, hardware, available models, ASR version. |
 | POST | `/api/media` | Upload a media file (multipart). Returns the media row. |
-| POST | `/api/jobs` | Create a job for an existing media row. |
+| POST | `/api/jobs` | Create a job for an existing media row; accepts `engine`, `diarization`, `polish`, `polish_model`, and `polish_full_transcript`. |
 | GET | `/api/jobs?limit=N` | List recent jobs. |
-| GET | `/api/jobs/{id}` | Job detail (status, progress, events, artifacts). |
+| GET | `/api/jobs/{id}` | Job detail (status, options, progress, events, artifacts). |
 | POST | `/api/jobs/{id}/cancel` | Cooperative cancel. |
-| GET | `/api/artifacts/{id}` | Download a produced artifact. |
-| GET | `/` `/system` `/jobs/{id}` | HTML pages (Jinja2). |
+| GET/PUT | `/api/jobs/{id}/editor` | Read or save derived text edits with optimistic `base_revision`. |
+| GET | `/api/artifacts/{id}` | Download a produced raw or derived artifact. |
+| GET | `/` `/system` `/jobs/{id}` `/jobs/{id}/editor` | HTML pages (Jinja2). |
 
 Errors are returned as a unified envelope:
 
 ```json
 { "error": { "code": "MEDIA_NOT_FOUND", "message": "...", "action": "..." } }
 ```
+
+`transcript.json` is the immutable `schema_version: "2.0"` /
+`transcript_kind: "raw_canonical"` source of truth. Optional
+`speaker.json` and `polished.json` are derived artifacts. Editor revisions are
+stored in SQLite and exposed through `/api/jobs/{id}/editor`; they never
+replace the canonical artifact. A stale revision returns `EDITOR_CONFLICT`
+(HTTP 409), and protected raw fields are rejected without changing the
+canonical artifact.
 
 ## Testing
 

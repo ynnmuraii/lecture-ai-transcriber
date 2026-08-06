@@ -3,10 +3,10 @@
 Implements the ``ASREngine`` port using the ``gigaam`` upstream library
 (``salute-developers/GigaAM``).
 
-**Local-only contract**: ``prepare`` and ``transcribe`` never download model
-weights.  Use ``provision_gigaam_model`` or ``list_cached_gigaam_models``
-(explicit provisioning helpers) to prime the cache from outside the
-transcription pipeline.
+**Local-only contract**: ``prepare`` and ``transcribe`` never download ASR or
+long-form VAD weights.  Use ``provision_gigaam_model`` or the upstream
+``pyannote/segmentation-3.0`` provisioning instructions to prime caches outside
+the transcription pipeline.
 
 **Supported variant**: ``v3_e2e_rnnt`` — the only e2e variant that bundles
 end-to-end punctuation and text-normalisation in a single checkpoint.
@@ -15,11 +15,13 @@ end-to-end punctuation and text-normalisation in a single checkpoint.
 ``prepare`` / ``close`` so that this module is importable on systems without
 those heavy runtimes installed.  Unit tests inject a fake loader to avoid it.
 """
+
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -70,6 +72,63 @@ _DEFAULT_CACHE_DIR: Path = Path.home() / ".cache" / "gigaam"
 # Expected filenames for the default v3_e2e_rnnt model inside the cache.
 _CHECKPOINT_FILENAME: str = f"{_MODEL_NAME}.ckpt"
 _TOKENIZER_FILENAME: str = f"{_MODEL_NAME}_tokenizer.model"
+
+_WINDOWS_DLL_HANDLES: list[Any] = []
+_WINDOWS_DLL_DIRECTORIES: set[Path] = set()
+
+
+def _configure_ffmpeg_dll_search() -> None:
+    """Register a shared FFmpeg directory before TorchCodec loads native DLLs."""
+    if os.name != "nt":
+        return
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if not callable(add_dll_directory):
+        return
+
+    configured = os.environ.get("LECTURE_TRANSCRIBER_FFMPEG_DIR")
+    raw_candidates = ([configured] if configured else []) + os.environ.get("PATH", "").split(
+        os.pathsep
+    )
+    seen: set[Path] = set()
+    for raw_candidate in raw_candidates:
+        if not raw_candidate:
+            continue
+        candidate = Path(raw_candidate).expanduser()
+        if candidate in seen or candidate in _WINDOWS_DLL_DIRECTORIES or not candidate.is_dir():
+            continue
+        seen.add(candidate)
+        if not any(candidate.glob("avcodec-*.dll")) or not any(candidate.glob("avutil-*.dll")):
+            continue
+        try:
+            _WINDOWS_DLL_HANDLES.append(add_dll_directory(str(candidate)))
+        except OSError:
+            continue
+        _WINDOWS_DLL_DIRECTORIES.add(candidate)
+        return
+
+
+@contextlib.contextmanager
+def _huggingface_offline() -> Iterator[None]:
+    """Prevent GigaAM's long-form VAD helper from downloading weights."""
+    previous_env = os.environ.get("HF_HUB_OFFLINE")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    hf_constants: Any | None = None
+    previous_constant: bool | None = None
+    try:
+        with contextlib.suppress(ImportError):
+            from huggingface_hub import constants as hf_constants
+
+        if hf_constants is not None:
+            previous_constant = bool(hf_constants.HF_HUB_OFFLINE)
+            hf_constants.HF_HUB_OFFLINE = True
+        yield
+    finally:
+        if hf_constants is not None and previous_constant is not None:
+            hf_constants.HF_HUB_OFFLINE = previous_constant
+        if previous_env is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = previous_env
 
 
 def _required_cache_files(model_name: str) -> tuple[str, ...]:
@@ -154,7 +213,7 @@ def _to_domain_segment(
     fields stay ``None``.  Word objects are copied into the segment as raw
     ``TranscriptWord`` values; no speaker or polish data is introduced here.
     """
-    raw_text: str = str(getattr(sdk_seg, "text", "") or "")
+    raw_text: str = str(getattr(sdk_seg, "text", "") or "").strip()
     words = tuple(
         TranscriptWord(
             index=word_index,
@@ -169,7 +228,7 @@ def _to_domain_segment(
         index=index,
         start=float(getattr(sdk_seg, "start", 0.0)),
         end=float(getattr(sdk_seg, "end", 0.0)),
-        text=raw_text.strip(),
+        text=raw_text,
         words=words,
         avg_logprob=None,
         compression_ratio=None,
@@ -207,8 +266,7 @@ def list_cached_gigaam_models(cache_dir: Path | None = None) -> list[str]:
     return [
         model_name
         for model_name in _SUPPORTED_MODEL_NAMES
-        if all((root / filename).is_file()
-               for filename in _required_cache_files(model_name))
+        if all((root / filename).is_file() for filename in _required_cache_files(model_name))
     ]
 
 
@@ -238,11 +296,7 @@ def provision_gigaam_model(
     except ModelLoadFailed:
         raise
     except Exception as exc:
-        raise ModelLoadFailed(
-            f"GigaAM model provisioning failed for {model_name}: {exc}"
-        ) from exc
-
-
+        raise ModelLoadFailed(f"GigaAM model provisioning failed for {model_name}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +339,7 @@ class GigaAMEngine(ASREngine):
         """Load the selected GigaAM model from its local cache."""
         if is_cancelled():
             raise JobCancelled("cancelled before GigaAM model load")
+        _configure_ffmpeg_dll_search()
 
         model_name = options.model_override or profile.model
         _validate_model_name(model_name)
@@ -314,9 +369,7 @@ class GigaAMEngine(ASREngine):
                 except ModelLoadFailed:
                     raise
                 except Exception as exc:
-                    raise ModelLoadFailed(
-                        f"GigaAM {model_name} failed to load: {exc}"
-                    ) from exc
+                    raise ModelLoadFailed(f"GigaAM {model_name} failed to load: {exc}") from exc
 
         if is_cancelled():
             self.close()
@@ -357,19 +410,17 @@ class GigaAMEngine(ASREngine):
 
         if model is None:
             raise AsrFailed(
-                "GigaAMEngine.transcribe() called without a prior prepare(); "
-                "call prepare() first."
+                "GigaAMEngine.transcribe() called without a prior prepare(); call prepare() first."
             )
-
+        _configure_ffmpeg_dll_search()
         try:
-            longform_result = model.transcribe_longform(
-                str(media_path),
-                word_timestamps=True,
-            )
+            with _huggingface_offline():
+                longform_result = model.transcribe_longform(
+                    str(media_path),
+                    word_timestamps=True,
+                )
         except Exception as exc:
-            raise AsrFailed(
-                f"GigaAM v3_e2e_rnnt transcription failed: {exc}"
-            ) from exc
+            raise AsrFailed(f"GigaAM v3_e2e_rnnt transcription failed: {exc}") from exc
 
         emitted_segments: list[TranscriptSegment] = []
         all_words: list[WordTiming] = []
@@ -380,9 +431,7 @@ class GigaAMEngine(ASREngine):
             try:
                 domain_seg = _to_domain_segment(sdk_seg, index=seg_index)
             except (TypeError, ValueError) as exc:
-                raise AsrFailed(
-                    f"invalid GigaAM segment at index {seg_index}: {exc}"
-                ) from exc
+                raise AsrFailed(f"invalid GigaAM segment at index {seg_index}: {exc}") from exc
             emitted_segments.append(domain_seg)
             on_segment(domain_seg)
 
@@ -390,9 +439,7 @@ class GigaAMEngine(ASREngine):
                 try:
                     all_words.append(_to_word_timing(domain_word))
                 except (TypeError, ValueError) as exc:
-                    raise AsrFailed(
-                        f"invalid GigaAM word in segment {seg_index}: {exc}"
-                    ) from exc
+                    raise AsrFailed(f"invalid GigaAM word in segment {seg_index}: {exc}") from exc
 
         # Derive total audio duration from the final segment boundary; GigaAM
         # does not expose a top-level duration field on LongformTranscriptionResult.
@@ -402,6 +449,7 @@ class GigaAMEngine(ASREngine):
 
         try:
             import gigaam as _gigaam_pkg
+
             _gigaam_version: str = getattr(_gigaam_pkg, "__version__", "unknown")
         except ImportError:
             _gigaam_version = "unknown"
@@ -470,4 +518,5 @@ class GigaAMEngine(ASREngine):
         if prev_device == "cuda":
             with contextlib.suppress(Exception):
                 import torch  # type: ignore[import-not-found]
+
                 torch.cuda.empty_cache()

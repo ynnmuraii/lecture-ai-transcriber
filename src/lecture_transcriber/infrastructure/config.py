@@ -46,18 +46,19 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = Field(default=120, ge=1, le=86_400)
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0.0, le=60.0)
     worker_shutdown_timeout_seconds: float = Field(default=10.0, gt=0.0, le=300.0)
+    diarization_model: str = "pyannote/speaker-diarization-community-1"
+    diarization_device: Literal["auto", "cpu", "cuda"] = "auto"
+    diarization_allow_download: bool = False
+    ollama_endpoint: str = "http://127.0.0.1:11434/api/chat"
+    ollama_timeout_seconds: float = Field(default=120.0, gt=0.0, le=3600.0)
     log_level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = "INFO"
 
     @model_validator(mode="after")
     def _validate_network_bind(self) -> Self:
         loopback_hosts = {"127.0.0.1", "::1", "localhost"}
-        if (
-            self.host.strip().lower() not in loopback_hosts
-            and not self.allow_unsafe_network_bind
-        ):
+        if self.host.strip().lower() not in loopback_hosts and not self.allow_unsafe_network_bind:
             raise ValueError(
-                "unsafe network bind requires "
-                "LECTURE_TRANSCRIBER_ALLOW_UNSAFE_NETWORK_BIND=true"
+                "unsafe network bind requires LECTURE_TRANSCRIBER_ALLOW_UNSAFE_NETWORK_BIND=true"
             )
         return self
 

@@ -17,12 +17,12 @@ from uuid import UUID, uuid5
 
 from lecture_transcriber.domain.enums import (
     ALLOWED_TRANSITIONS,
+    TERMINAL_STATUSES,
     ASREngineChoice,
     DiarizationBackend,
-    PolishBackend,
-    TERMINAL_STATUSES,
     JobStatus,
     MediaType,
+    PolishBackend,
     WarningCode,
 )
 from lecture_transcriber.domain.errors import (
@@ -117,7 +117,7 @@ class TranscriptionOptions:
         ``ollama`` sends ``needs_review`` segments to a local Ollama model.
     polish_model
         Ollama model tag used when ``polish=ollama``.  An empty string means
-        "use the application default" (e.g. ``t-lite-it-2.1:q4_k_m``).
+        "use the application default" (e.g. ``t-tech/T-lite-it-2.1:q4_k_m``).
     polish_full_transcript
         When ``True`` every segment is sent for polishing, not just those
         flagged ``needs_review=True``.  Defaults to ``False`` to preserve
@@ -151,15 +151,9 @@ class TranscriptionOptions:
             _require_finite("temperatures", t)
             if t < 0:
                 raise ValueError("temperatures must be non-negative")
-        _require_in_range(
-            "vad_min_silence_ms", self.vad_min_silence_ms, low=0, high=10_000
-        )
-        _require_in_range(
-            "vad_speech_pad_ms", self.vad_speech_pad_ms, low=0, high=10_000
-        )
-        _require_in_range(
-            "chunk_length_seconds", self.chunk_length_seconds, low=5, high=600
-        )
+        _require_in_range("vad_min_silence_ms", self.vad_min_silence_ms, low=0, high=10_000)
+        _require_in_range("vad_speech_pad_ms", self.vad_speech_pad_ms, low=0, high=10_000)
+        _require_in_range("chunk_length_seconds", self.chunk_length_seconds, low=5, high=600)
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -186,24 +180,26 @@ class TranscriptionOptions:
             raw_engine = data.get("engine", ASREngineChoice.AUTO.value)
             try:
                 engine = ASREngineChoice(raw_engine)
-            except ValueError:
+            except ValueError as exc:
                 raise ValueError(
-                    f"engine must be one of {[e.value for e in ASREngineChoice]}, got {raw_engine!r}"
-                )
+                    "engine must be one of "
+                    f"{[e.value for e in ASREngineChoice]}, got {raw_engine!r}"
+                ) from exc
             raw_diarization = data.get("diarization", DiarizationBackend.OFF.value)
             try:
                 diarization = DiarizationBackend(raw_diarization)
-            except ValueError:
+            except ValueError as exc:
                 raise ValueError(
-                    f"diarization must be one of {[e.value for e in DiarizationBackend]}, got {raw_diarization!r}"
-                )
+                    "diarization must be one of "
+                    f"{[e.value for e in DiarizationBackend]}, got {raw_diarization!r}"
+                ) from exc
             raw_polish = data.get("polish", PolishBackend.OFF.value)
             try:
                 polish = PolishBackend(raw_polish)
-            except ValueError:
+            except ValueError as exc:
                 raise ValueError(
                     f"polish must be one of {[e.value for e in PolishBackend]}, got {raw_polish!r}"
-                )
+                ) from exc
             polish_full = data.get("polish_full_transcript", False)
             if not isinstance(polish_full, bool):
                 raise ValueError("polish_full_transcript must be a boolean")
@@ -383,9 +379,7 @@ class PolishResult:
     def __post_init__(self) -> None:
         _require_non_negative_int("segment_index", self.segment_index)
         if self.changed and not self.polished_text:
-            raise ValueError(
-                "polished_text must be set when changed=True"
-            )
+            raise ValueError("polished_text must be set when changed=True")
 
 
 @dataclass(frozen=True)
@@ -602,13 +596,16 @@ class Transcript:
         }
 
     def canonical_json(self) -> str:
-        return json.dumps(
-            self.to_canonical_dict(),
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-            allow_nan=False,
-        ) + "\n"
+        return (
+            json.dumps(
+                self.to_canonical_dict(),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
+        )
 
 
 @dataclass(frozen=True)
@@ -617,17 +614,81 @@ class Artifact:
 
     id: UUID
     job_id: UUID
-    format: Literal["json", "txt", "srt", "vtt"]
+    format: Literal[
+        "json",
+        "txt",
+        "srt",
+        "vtt",
+        "speaker",
+        "speaker_txt",
+        "polished",
+        "editor",
+    ]
     relative_path: str
     size_bytes: int
     sha256: str
     created_at: datetime
 
     def __post_init__(self) -> None:
-        if self.format not in ("json", "txt", "srt", "vtt"):
-            raise ValueError("artifact format must be json, txt, srt or vtt")
+        if self.format not in {
+            "json",
+            "txt",
+            "srt",
+            "vtt",
+            "speaker",
+            "speaker_txt",
+            "polished",
+            "editor",
+        }:
+            raise ValueError(
+                "artifact format must be json, txt, srt, vtt, speaker, "
+                "speaker_txt, polished or editor"
+            )
         _require_non_negative_int("size_bytes", self.size_bytes)
         _require_sha256(self.sha256)
+
+
+@dataclass(frozen=True)
+class EditorEdit:
+    """One derived text edit keyed by an immutable canonical segment ID."""
+
+    segment_id: str
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.segment_id:
+            raise ValueError("segment_id must not be empty")
+        if not self.text.strip():
+            raise ValueError("edited text must not be empty")
+
+
+@dataclass(frozen=True)
+class EditorRevisionEntry:
+    """Append-only editor revision metadata and changed segment values."""
+
+    revision: int
+    raw_sha256: str
+    edits: tuple[EditorEdit, ...]
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_non_negative_int("revision", self.revision)
+        _require_sha256(self.raw_sha256)
+
+
+@dataclass(frozen=True)
+class EditorDocumentState:
+    """Persisted editor state for one exact raw transcript artifact."""
+
+    job_id: UUID
+    raw_sha256: str
+    revision: int
+    edits: tuple[EditorEdit, ...]
+    history: tuple[EditorRevisionEntry, ...]
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.raw_sha256)
+        _require_non_negative_int("revision", self.revision)
 
 
 @dataclass(frozen=True)

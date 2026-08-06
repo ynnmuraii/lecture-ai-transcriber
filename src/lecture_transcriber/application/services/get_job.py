@@ -59,6 +59,12 @@ class GetJobService:
             error_message=job.error_message,
             requested_language=job.requested_language,
             requested_model=job.requested_model,
+            engine=job.options.engine,
+            diarization=job.options.diarization,
+            polish=job.options.polish,
+            polish_model=job.options.polish_model,
+            polish_full_transcript=job.options.polish_full_transcript,
+            effective_model=(job.effective_profile.model if job.effective_profile else None),
             effective_profile=job.effective_profile,
             events=events,
             artifacts=artifacts,
@@ -78,9 +84,7 @@ class GetJobService:
         return tuple(out)
 
 
-def _summary_from(
-    job: TranscriptionJob, media: Media | None
-) -> JobSummary:
+def _summary_from(job: TranscriptionJob, media: Media | None) -> JobSummary:
     return JobSummary(
         id=job.id,
         media_id=job.media_id,
@@ -91,6 +95,12 @@ def _summary_from(
         error_code=job.error_code,
         requested_language=job.requested_language,
         requested_model=job.requested_model,
+        engine=job.options.engine,
+        diarization=job.options.diarization,
+        polish=job.options.polish,
+        polish_model=job.options.polish_model,
+        polish_full_transcript=job.options.polish_full_transcript,
+        effective_model=(job.effective_profile.model if job.effective_profile else None),
         profile_name=job.effective_profile.name if job.effective_profile else None,
         created_at=job.created_at,
         started_at=job.started_at,

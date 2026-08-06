@@ -79,9 +79,7 @@ def default_runtime_factory(
     )
 
 
-def _to_domain_segment(
-    sdk_segment: Any, *, index: int
-) -> TranscriptSegment:
+def _to_domain_segment(sdk_segment: Any, *, index: int) -> TranscriptSegment:
     """Map an SDK ``Segment`` to the domain ``TranscriptSegment``.
 
     The text is preserved verbatim apart from a single outer-whitespace strip.

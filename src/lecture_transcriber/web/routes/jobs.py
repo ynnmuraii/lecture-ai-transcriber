@@ -52,6 +52,11 @@ def create_job(
     options = TranscriptionOptions(
         language=payload.language,
         model_override=payload.model_override,
+        engine=payload.engine,
+        diarization=payload.diarization,
+        polish=payload.polish,
+        polish_model=payload.polish_model,
+        polish_full_transcript=payload.polish_full_transcript,
     )
     try:
         summary = create.create(payload.media_id, options)
@@ -113,6 +118,12 @@ def _summary_to_out(s: JobSummary) -> JobSummaryOut:
         error_code=s.error_code,
         requested_language=s.requested_language,
         requested_model=s.requested_model,
+        engine=s.engine,
+        diarization=s.diarization,
+        polish=s.polish,
+        polish_model=s.polish_model,
+        polish_full_transcript=s.polish_full_transcript,
+        effective_model=s.effective_model,
         profile_name=s.profile_name,
     )
 
@@ -149,6 +160,12 @@ def _detail_to_out(d: JobDetail) -> JobDetailOut:
         profile_name=d.effective_profile.name if d.effective_profile else None,
         requested_language=d.requested_language,
         requested_model=d.requested_model,
+        engine=d.engine,
+        diarization=d.diarization,
+        polish=d.polish,
+        polish_model=d.polish_model,
+        polish_full_transcript=d.polish_full_transcript,
+        effective_model=d.effective_model,
     )
 
 

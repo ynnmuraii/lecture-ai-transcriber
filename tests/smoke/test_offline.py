@@ -56,9 +56,7 @@ def _silence_mp3(path: Path, seconds: int = 1, rate: int = 16_000) -> None:
     stream = out.add_stream("libmp3lame", rate=rate)
     stream.layout = "mono"
     samples = np.zeros(rate * seconds, dtype=np.int16)
-    frame = av.AudioFrame.from_ndarray(
-        samples.reshape(1, -1), format="s16", layout="mono"
-    )
+    frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
     frame.sample_rate = rate
     for packet in stream.encode(frame):
         out.mux(packet)
@@ -72,9 +70,7 @@ def _silence_mp4(path: Path, seconds: int = 1, rate: int = 16_000) -> None:
     stream = out.add_stream("aac", rate=rate)
     stream.layout = "mono"
     samples = np.zeros(rate * seconds, dtype=np.int16)
-    frame = av.AudioFrame.from_ndarray(
-        samples.reshape(1, -1), format="s16", layout="mono"
-    )
+    frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
     frame.sample_rate = rate
     for packet in stream.encode(frame):
         out.mux(packet)
@@ -134,9 +130,7 @@ def test_offline_does_not_make_network_calls(
     def _no_connect(self, address):  # type: ignore[no-untyped-def]
         host = address[0] if isinstance(address, tuple) else address
         if host not in {"127.0.0.1", "localhost", "::1", "testserver"}:
-            raise AssertionError(
-                f"network access is not allowed in offline test (host={host!r})"
-            )
+            raise AssertionError(f"network access is not allowed in offline test (host={host!r})")
         return original_connect(self, address)
 
     monkeypatch.setattr(socket.socket, "connect", _no_connect)

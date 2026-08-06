@@ -18,7 +18,8 @@ from lecture_transcriber.domain.enums import JobStatus
 from lecture_transcriber.domain.models import (
     Artifact,
     DiarizationTurn,
-    EditorRevision,
+    EditorDocumentState,
+    EditorEdit,
     EngineMetadata,
     HardwareFacts,
     HardwareProfile,
@@ -40,7 +41,7 @@ __all__ = [
     "Clock",
     "DiarizationEngine",
     "DiarizationResult",
-    "EditorRevision",
+    "EditorRepository",
     "FileStore",
     "HardwareDetectorPort",
     "JobEventRepository",
@@ -315,14 +316,33 @@ class ArtifactRepository(Protocol):
 
 
 @runtime_checkable
+class EditorRepository(Protocol):
+    """Persistence port for append-only derived editor revisions."""
+
+    def get_or_create(
+        self,
+        job_id: UUID,
+        raw_sha256: str,
+        occurred_at: datetime,
+    ) -> EditorDocumentState: ...
+
+    def append_revision(
+        self,
+        job_id: UUID,
+        raw_sha256: str,
+        base_revision: int,
+        edits: tuple[EditorEdit, ...],
+        occurred_at: datetime,
+    ) -> EditorDocumentState: ...
+
+
+@runtime_checkable
 class JobRepository(Protocol):
     def add(self, job: TranscriptionJob) -> None: ...
     def add_with_event(self, job: TranscriptionJob, event: JobEvent) -> None: ...
     def get(self, job_id: UUID) -> TranscriptionJob | None: ...
     def list_recent(self, limit: int) -> tuple[TranscriptionJob, ...]: ...
-    def claim_next(
-        self, worker_id: str, lease_seconds: int
-    ) -> TranscriptionJob | None: ...
+    def claim_next(self, worker_id: str, lease_seconds: int) -> TranscriptionJob | None: ...
     def claim(
         self,
         job_id: UUID,

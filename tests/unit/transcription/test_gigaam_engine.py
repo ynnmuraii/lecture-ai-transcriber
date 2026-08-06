@@ -14,8 +14,10 @@ All tests use an injectable fake loader so that neither ``gigaam`` nor
 * ``provision_gigaam_model`` delegates to loader and wraps non-domain errors
 * ``GigaAMEngine.transcribe`` raises ``AsrFailed`` without prior ``prepare``
 """
+
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import lecture_transcriber.transcription.gigaam_engine as gigaam_engine
 from lecture_transcriber.domain.errors import (
     AsrFailed,
     JobCancelled,
@@ -122,6 +125,34 @@ def _make_cache_dir(tmp_path: Path, *, with_ckpt: bool = True, with_tok: bool = 
 
 
 class TestSegmentWordMapping:
+    def test_longform_runs_offline_and_restores_environment(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Long-form VAD cannot download and does not leak process state."""
+        observed: list[str | None] = []
+        model = _make_fake_model([FakeSegment("text", 0.0, 1.0, [])])
+
+        def _transcribe_longform(*_: Any, **__: Any) -> FakeLongformResult:
+            observed.append(os.environ.get("HF_HUB_OFFLINE"))
+            return FakeLongformResult(segments=[FakeSegment("text", 0.0, 1.0, [])])
+
+        model.transcribe_longform.side_effect = _transcribe_longform
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        cache = _make_cache_dir(tmp_path)
+        engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(model))
+        engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
+        engine.transcribe(
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
+            is_cancelled=lambda: False,
+        )
+
+        assert observed == ["1"]
+        assert "HF_HUB_OFFLINE" not in os.environ
+
     def test_segments_ordered_by_emission(self, tmp_path: Path) -> None:
         """Segments must be indexed 0, 1, 2 in emission order."""
         segs = [
@@ -154,7 +185,9 @@ class TestSegmentWordMapping:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model(segs)))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert result.segments[0].text == "hello world"
@@ -166,7 +199,9 @@ class TestSegmentWordMapping:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model(segs)))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         seg = result.segments[0]
@@ -188,7 +223,9 @@ class TestSegmentWordMapping:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model(segs)))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert [word.index for word in result.segments[0].words] == [0, 1]
@@ -209,7 +246,9 @@ class TestSegmentWordMapping:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model(segs)))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert len(result.words) == 2
@@ -218,16 +257,18 @@ class TestSegmentWordMapping:
     def test_words_flattened_across_segments(self, tmp_path: Path) -> None:
         """ASRResult.words contains words from all segments in order."""
         segs = [
-            FakeSegment("Один два", 0.0, 2.0,
-                        [FakeWord("Один", 0.0, 0.8), FakeWord("два", 1.0, 1.8)]),
-            FakeSegment("Три", 2.0, 3.5,
-                        [FakeWord("Три", 2.1, 3.3)]),
+            FakeSegment(
+                "Один два", 0.0, 2.0, [FakeWord("Один", 0.0, 0.8), FakeWord("два", 1.0, 1.8)]
+            ),
+            FakeSegment("Три", 2.0, 3.5, [FakeWord("Три", 2.1, 3.3)]),
         ]
         cache = _make_cache_dir(tmp_path)
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model(segs)))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert len(result.words) == 3
@@ -244,7 +285,9 @@ class TestSegmentWordMapping:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model(segs)))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert not hasattr(result.words[0], "speaker_id")
@@ -258,7 +301,9 @@ class TestSegmentWordMapping:
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         with pytest.raises(AsrFailed, match="invalid GigaAM segment"):
             engine.transcribe(
-                Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+                Path("dummy.wav"),
+                _default_options(),
+                on_segment=lambda _: None,
                 is_cancelled=lambda: False,
             )
 
@@ -272,7 +317,9 @@ class TestSegmentWordMapping:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model(segs)))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert result.source_duration_seconds == pytest.approx(7.5)
@@ -283,7 +330,9 @@ class TestSegmentWordMapping:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model([])))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert result.segments == ()
@@ -302,7 +351,9 @@ class TestASRResultMetadata:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model([])))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert result.engine.name == "gigaam"
@@ -315,7 +366,9 @@ class TestASRResultMetadata:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model([])))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert result.language.detected == "ru"
@@ -327,7 +380,9 @@ class TestASRResultMetadata:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(_make_fake_model([])))
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         result = engine.transcribe(
-            Path("dummy.wav"), _default_options(), on_segment=lambda _: None,
+            Path("dummy.wav"),
+            _default_options(),
+            on_segment=lambda _: None,
             is_cancelled=lambda: False,
         )
         assert result.vad_duration_seconds is None
@@ -343,9 +398,7 @@ class TestCancellation:
         cache = _make_cache_dir(tmp_path)
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(MagicMock()))
         with pytest.raises(JobCancelled):
-            engine.prepare(
-                _cpu_profile(), _default_options(), is_cancelled=lambda: True
-            )
+            engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: True)
 
     def test_cancel_after_prepare_closes_model(self, tmp_path: Path) -> None:
         """If cancelled after load, model is released."""
@@ -369,7 +422,8 @@ class TestCancellation:
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         with pytest.raises(JobCancelled):
             engine.transcribe(
-                Path("dummy.wav"), _default_options(),
+                Path("dummy.wav"),
+                _default_options(),
                 on_segment=lambda _: None,
                 is_cancelled=lambda: True,
             )
@@ -391,10 +445,12 @@ class TestCancellation:
             call_count += 1
             # Calls: before transcribe, before first segment, before second.
             return call_count > 2
+
         collected: list[TranscriptSegment] = []
         with pytest.raises(JobCancelled):
             engine.transcribe(
-                Path("dummy.wav"), _default_options(),
+                Path("dummy.wav"),
+                _default_options(),
                 on_segment=collected.append,
                 is_cancelled=_cancel,
             )
@@ -451,7 +507,8 @@ class TestAsrFailed:
         engine = GigaAMEngine(cache_dir=cache, loader=_make_loader(MagicMock()))
         with pytest.raises(AsrFailed, match="prepare"):
             engine.transcribe(
-                Path("dummy.wav"), _default_options(),
+                Path("dummy.wav"),
+                _default_options(),
                 on_segment=lambda _: None,
                 is_cancelled=lambda: False,
             )
@@ -464,7 +521,8 @@ class TestAsrFailed:
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         with pytest.raises(AsrFailed, match="audio decode error"):
             engine.transcribe(
-                Path("dummy.wav"), _default_options(),
+                Path("dummy.wav"),
+                _default_options(),
                 on_segment=lambda _: None,
                 is_cancelled=lambda: False,
             )
@@ -478,7 +536,8 @@ class TestAsrFailed:
         engine.prepare(_cpu_profile(), _default_options(), is_cancelled=lambda: False)
         with pytest.raises(AsrFailed):
             engine.transcribe(
-                Path("dummy.wav"), _default_options(),
+                Path("dummy.wav"),
+                _default_options(),
                 on_segment=lambda _: None,
                 is_cancelled=lambda: False,
             )
@@ -642,3 +701,39 @@ class TestProvisionGigaAMModel:
         loader = MagicMock(return_value=MagicMock())
         provision_gigaam_model(cache_dir=target, loader=loader)
         assert target.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Windows FFmpeg DLL discovery
+# ---------------------------------------------------------------------------
+
+
+class TestFFmpegDllDiscovery:
+    def test_registers_shared_ffmpeg_directory_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ffmpeg_dir = tmp_path / "ffmpeg-bin"
+        ffmpeg_dir.mkdir()
+        (ffmpeg_dir / "avcodec-62.dll").touch()
+        (ffmpeg_dir / "avutil-60.dll").touch()
+        add_dll_directory = MagicMock(return_value=object())
+
+        monkeypatch.setattr(gigaam_engine.os, "name", "nt")
+        monkeypatch.setattr(
+            gigaam_engine.os,
+            "add_dll_directory",
+            add_dll_directory,
+            raising=False,
+        )
+        monkeypatch.delenv("LECTURE_TRANSCRIBER_FFMPEG_DIR", raising=False)
+        monkeypatch.setenv("PATH", str(ffmpeg_dir))
+        gigaam_engine._WINDOWS_DLL_HANDLES.clear()
+        gigaam_engine._WINDOWS_DLL_DIRECTORIES.clear()
+
+        gigaam_engine._configure_ffmpeg_dll_search()
+        gigaam_engine._configure_ffmpeg_dll_search()
+
+        add_dll_directory.assert_called_once_with(str(ffmpeg_dir))
+        assert {ffmpeg_dir} == gigaam_engine._WINDOWS_DLL_DIRECTORIES
+        gigaam_engine._WINDOWS_DLL_HANDLES.clear()
+        gigaam_engine._WINDOWS_DLL_DIRECTORIES.clear()

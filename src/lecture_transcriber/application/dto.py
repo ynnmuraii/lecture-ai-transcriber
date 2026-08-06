@@ -11,12 +11,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from lecture_transcriber.domain.enums import JobStatus
-from lecture_transcriber.domain.models import (
-    Artifact,
-    HardwareProfile,
-    JobEvent,
+from lecture_transcriber.domain.enums import (
+    ASREngineChoice,
+    DiarizationBackend,
+    JobStatus,
+    PolishBackend,
 )
+from lecture_transcriber.domain.models import Artifact, HardwareProfile, JobEvent
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,12 @@ class JobSummary:
     error_code: str | None
     requested_language: str | None
     requested_model: str | None
+    engine: ASREngineChoice
+    diarization: DiarizationBackend
+    polish: PolishBackend
+    polish_model: str
+    polish_full_transcript: bool
+    effective_model: str | None
     profile_name: str | None
     created_at: datetime
     started_at: datetime | None
@@ -53,6 +60,12 @@ class JobDetail:
     error_message: str | None
     requested_language: str | None
     requested_model: str | None
+    engine: ASREngineChoice
+    diarization: DiarizationBackend
+    polish: PolishBackend
+    polish_model: str
+    polish_full_transcript: bool
+    effective_model: str | None
     effective_profile: HardwareProfile | None
     events: tuple[JobEvent, ...]
     artifacts: tuple[Artifact, ...]

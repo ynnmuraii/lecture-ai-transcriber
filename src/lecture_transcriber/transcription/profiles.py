@@ -89,8 +89,7 @@ class ProfileSelector:
                 cpu_threads=_clamp_threads(facts.cpu_count),
                 batch_size=1,
                 reason=(
-                    f"cuda available (name={facts.cuda_name!r}, vram={vram}); "
-                    f"selected {band} band"
+                    f"cuda available (name={facts.cuda_name!r}, vram={vram}); selected {band} band"
                 ),
             )
 
@@ -119,7 +118,5 @@ class ProfileSelector:
             model=requested_model or default_model,
             cpu_threads=_clamp_threads(facts.cpu_count),
             batch_size=1,
-            reason=(
-                f"cuda not available; ram={ram} bytes falls into {band} band"
-            ),
+            reason=(f"cuda not available; ram={ram} bytes falls into {band} band"),
         )

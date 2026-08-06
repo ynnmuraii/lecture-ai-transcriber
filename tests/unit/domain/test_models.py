@@ -87,15 +87,9 @@ def test_word_rejects_out_of_range_probability() -> None:
 
 
 def test_word_accepts_boundary_probabilities_and_none() -> None:
-    assert TranscriptWord(
-        index=0, start=0.0, end=0.5, text="x", probability=0.0
-    ).probability == 0.0
-    assert TranscriptWord(
-        index=0, start=0.0, end=0.5, text="x", probability=1.0
-    ).probability == 1.0
-    assert (
-        TranscriptWord(index=0, start=0.0, end=0.5, text="x").probability is None
-    )
+    assert TranscriptWord(index=0, start=0.0, end=0.5, text="x", probability=0.0).probability == 0.0
+    assert TranscriptWord(index=0, start=0.0, end=0.5, text="x", probability=1.0).probability == 1.0
+    assert TranscriptWord(index=0, start=0.0, end=0.5, text="x").probability is None
 
 
 def test_segment_rejects_misordered_words() -> None:
@@ -348,9 +342,7 @@ def test_canonical_json_is_deterministic_and_has_schema_version() -> None:
 
 def test_canonical_json_preserves_verbatim_text() -> None:
     media = _media()
-    seg = TranscriptSegment(
-        index=0, start=0.0, end=1.0, text="  спасибо за просмотр  "
-    )
+    seg = TranscriptSegment(index=0, start=0.0, end=1.0, text="  спасибо за просмотр  ")
     transcript = Transcript(
         schema_version="2.0",
         job_id=uuid4(),
@@ -449,9 +441,7 @@ def test_canonical_json_v2_rounds_word_timestamps_to_3_decimals() -> None:
         start=0.0,
         end=1.0,
         text="x",
-        words=(
-            TranscriptWord(index=0, start=0.1234, end=0.5678, text="x", probability=0.9),
-        ),
+        words=(TranscriptWord(index=0, start=0.1234, end=0.5678, text="x", probability=0.9),),
     )
     transcript = Transcript(
         schema_version="2.0",
@@ -642,6 +632,7 @@ def test_polish_result_requires_text_when_changed() -> None:
 
 def test_editor_revision_requires_non_empty_text() -> None:
     from datetime import UTC, datetime
+
     from lecture_transcriber.domain.models import EditorRevision
 
     with pytest.raises(ValueError, match="revised_text must not be empty"):

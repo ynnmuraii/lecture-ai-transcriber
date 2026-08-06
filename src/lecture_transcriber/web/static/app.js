@@ -4,6 +4,43 @@
 
   function $(id) { return document.getElementById(id); }
 
+  const GIGAAM_MODELS = [
+    "v3_e2e_rnnt",
+    "multilingual_ctc",
+    "multilingual_large_ctc",
+  ];
+  let availableModels = [];
+
+  function refreshModelOptions() {
+    const sel = $("model");
+    if (!sel) return;
+    const selected = sel.value;
+    const engine = $("engine");
+    const models = engine && engine.value === "gigaam" ? GIGAAM_MODELS : availableModels;
+    sel.textContent = "";
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = "auto";
+    sel.appendChild(auto);
+    for (const model of models) {
+      const option = document.createElement("option");
+      option.value = model;
+      option.textContent = model;
+      sel.appendChild(option);
+    }
+    if (models.includes(selected)) sel.value = selected;
+  }
+
+  function updatePolishControls() {
+    const polish = $("polish");
+    const model = $("polish_model");
+    const full = $("polish_full_transcript");
+    if (!polish || !model || !full) return;
+    const enabled = polish.value === "ollama";
+    model.disabled = !enabled;
+    full.disabled = !enabled;
+  }
+
   function text(el, value) {
     if (el) el.textContent = value == null ? "" : String(value);
   }
@@ -30,15 +67,8 @@
       text($("info-cuda"), h.cuda_available ? (h.cuda_name || "yes") : "no");
       text($("info-engine"), s.asr_engine);
       text($("info-version"), s.asr_version);
-      const sel = $("model");
-      if (sel) {
-        for (const m of s.available_models || []) {
-          const opt = document.createElement("option");
-          opt.value = m;
-          opt.textContent = m;
-          sel.appendChild(opt);
-        }
-      }
+      availableModels = s.available_models || [];
+      refreshModelOptions();
     } catch (e) { /* ignore */ }
   }
 
@@ -99,6 +129,11 @@
         media_id: mediaId,
         language: $("language").value || null,
         model_override: $("model").value || null,
+        engine: $("engine").value,
+        diarization: $("diarization").value,
+        polish: $("polish").value,
+        polish_model: $("polish_model").value.trim(),
+        polish_full_transcript: $("polish_full_transcript").checked,
       }),
     });
     const jbody = await jr.json().catch(() => ({}));
@@ -113,6 +148,12 @@
     loadSystem();
     loadJobs();
     setInterval(loadJobs, 5000);
+    const engine = $("engine");
+    if (engine) engine.addEventListener("change", refreshModelOptions);
+    const polish = $("polish");
+    if (polish) polish.addEventListener("change", updatePolishControls);
+    refreshModelOptions();
+    updatePolishControls();
     const form = $("upload-form");
     if (form) form.addEventListener("submit", (e) => { e.preventDefault(); upload(form); });
   });
